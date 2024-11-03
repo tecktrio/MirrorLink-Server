@@ -217,6 +217,27 @@ class Administrator(APIView):
                 # MyContent_list.append(content)
             return Response({'status_text':'ok','status_code':200,'data':content})
         
+        elif service == 'GetMirrorDetails':
+            required_fields = ['login_key','mirror_id']
+            login_key = request.data['login_key']
+            mirror_id = request.data['mirror_id']
+            administrator = administrators_collection.find_one({'login_key':login_key})
+            mirror = mirror_collection.find_one({'_id':ObjectId(mirror_id)})
+               
+                       
+            # MyContent_list = []
+            # for content in MyContents:
+            if '_id' in mirror:
+                mirror['_id'] = str(mirror['_id'])
+            if 'administrator_id' in mirror:
+                mirror['administrator_id'] = str(mirror['administrator_id'])
+            if 'site_id' in mirror:
+                mirror['site_id'] = str(mirror['site_id'])
+            if 'mirror_id' in mirror:
+                mirror['mirror_id'] = str(mirror['mirror_id'])
+                # MyContent_list.append(content)
+            return Response({'status_text':'ok','status_code':200,'data':mirror})
+        
         elif service == 'AddSite':
             print(request.data)
             required_fields = ['site_description','site_name','login_key']
@@ -362,13 +383,14 @@ class Administrator(APIView):
 class Mirror(APIView):
 
     def post(self, request):
-
+        print('login service')
         if 'service' in request.data:
             service = request.data['service']
         else:
             return Response({'status_code':200, 'status_text':'Required service'})
 
         if service == 'login':
+            print('login service')
             username = request.data['username']
             password = request.data['password']
             if mirror_collection.find_one({"username":username,"password":password}):   
@@ -419,3 +441,7 @@ class Mirror(APIView):
                     return Response({'status_text':'Not Allowed','status_code':401}) 
             else:
                 return Response({'status_text':'UnAuthorised','status_code':401})
+
+    def get(self, request):
+
+        Response({},status=500)
