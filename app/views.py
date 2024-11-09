@@ -408,6 +408,7 @@ class Mirror(APIView):
                             content['administrator_id'] = str(content['administrator_id'])
                         content_list.append(content)
                     return Response({'status_text':'ok','status_code':200,'data':content_list})
+            return Response({'status_text':'Username or Password do not Exist','status_code':401})
             
         elif service == 'register':
             required_data = ['username','password','site_name','administrator_username','mirror_name','mirror_description']

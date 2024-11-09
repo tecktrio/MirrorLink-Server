@@ -7,7 +7,6 @@ from app.models import mirror_collection, administrators_collection, content_col
 from firebase_admin import storage
 
 from bson.objectid import ObjectId
-
 users = []
 
 class ControllerConsumer(AsyncWebsocketConsumer):
