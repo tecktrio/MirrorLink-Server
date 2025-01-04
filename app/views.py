@@ -146,9 +146,11 @@ class Administrator(APIView):
             return Response({'status_text':'Invalid key','status_code':500})
                        
         elif service == 'GetMyMirrors':
+            print('the request is inside getmymirror service')
             required_fields = [ 'login_key']
             login_key = request.data['login_key']
             administrator = administrators_collection.find_one({'login_key':login_key})
+            print('this is the administrator',administrator)
             if administrator:
                 if not all(field in request.data for field in required_fields):
                     return Response({'status_text':'Required  login_key'})
@@ -157,9 +159,6 @@ class Administrator(APIView):
             
                     MyMirrors = mirror_collection.find({'administrator_id':ObjectId(administrator_id)})
                         
-                    
-
-                    
                     MyMirrors_list = []
                     for mirror in MyMirrors:
                         if '_id' in mirror:
