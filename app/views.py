@@ -17,6 +17,7 @@ class Administrator(APIView):
 
         if 'service' in request.data:
             service = request.data['service']
+            print(service)
         else:
             return Response({'status_code':200, 'status_text':'Required service'})
 
