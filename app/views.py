@@ -299,7 +299,7 @@ class Administrator(APIView):
             administrator = administrators_collection.find_one({'login_key':login_key})
             administrator_id =administrator.get('_id')
 
-            # print(request.data)
+            print(request.data)
 
             MyContents = content_collection.find({'administrator_id':ObjectId(administrator_id)})
             MyContent_list = []
