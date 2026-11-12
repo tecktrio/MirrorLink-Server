@@ -46,9 +46,9 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
-    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
@@ -137,4 +137,45 @@ STATIC_URL = 'static/'
 # https://docs.djangoproject.com/en/4.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# ==========================================
+# CORS & Origin Configuration - Allow Everywhere
+# ==========================================
 CORS_ALLOW_ALL_ORIGINS = True
+CORS_ORIGIN_ALLOW_ALL = True
+CORS_ALLOW_CREDENTIALS = True
+
+from corsheaders.defaults import default_headers, default_methods
+
+CORS_ALLOW_HEADERS = list(default_headers) + [
+    '*',
+]
+CORS_ALLOW_METHODS = list(default_methods) + [
+    'DELETE',
+    'GET',
+    'OPTIONS',
+    'PATCH',
+    'POST',
+    'PUT',
+]
+
+CSRF_TRUSTED_ORIGINS = [
+    'https://*.bigburry.com',
+    'https://mirrorlink.bigburry.com',
+    'http://mirrorlink.bigburry.com',
+    'http://localhost:3000',
+    'http://localhost:4000',
+    'http://localhost:8085',
+    'http://127.0.0.1:3000',
+    'http://127.0.0.1:4000',
+    'http://127.0.0.1:8085',
+    'http://32.236.228.113:3000',
+    'http://32.236.228.113:4000',
+    'http://32.236.228.113:8085',
+    'http://32.236.228.113:8000',
+]
+
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': [],
+    'DEFAULT_PERMISSION_CLASSES': [],
+}
