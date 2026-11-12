@@ -37,7 +37,7 @@ class Administrator(APIView):
     def post(self, request):
         if 'service' in request.data:
             service = request.data['service']
-            print("Incoming service request:", service, "data:", request.data)
+            # print("Incoming service request:", service, "data:", request.data)
         else:
             return Response({'status_code': 400, 'status_text': 'Required service'}, status=400)
 

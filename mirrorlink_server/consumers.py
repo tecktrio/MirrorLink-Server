@@ -21,7 +21,7 @@ class ControllerConsumer(AsyncWebsocketConsumer):
         if administrators_collection.find_one({'administrator_login_return_key':client_key}):
                 # print('here')
             # if client_key ==  "key":
-                print(self.channel_name)
+                # print(self.channel_name)
                 self.administrator = administrators_collection.find_one({'administrator_login_return_key':client_key})
                 await self.accept()
                   # Add the connected client to a group (e.g., group name can be 'mirror_group')
@@ -170,9 +170,11 @@ class ControllerConsumer(AsyncWebsocketConsumer):
                             )
 
                     else:
-                        print("Mirror not found")
+                        # print("Mirror not found")
+                        pass
                 else:
-                    print("Site not found")
+                    # print("Site not found")
+                    pass
                 
 
                 # Optionally delete the local file after upload
