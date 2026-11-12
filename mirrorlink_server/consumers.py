@@ -436,11 +436,13 @@ class MirrorConsumer(AsyncWebsocketConsumer):
 
         if mirror:
             self.mirror = mirror
+            current_time = time.time()
             filter_op = {'_id': self.mirror.get("_id")}
             update_op = {
                 '$set': {
                     'websocket_channel_name': self.channel_name,
-                    'mirror_login_return_key': self.mirror.get('username', '') + self.mirror.get('password', '')
+                    'mirror_login_return_key': self.mirror.get('username', '') + self.mirror.get('password', ''),
+                    'last_active_timestamp': current_time
                 }
             }
             mirror_collection.update_one(filter_op, update_op)
@@ -510,7 +512,7 @@ class MirrorConsumer(AsyncWebsocketConsumer):
                 'mirror_id': str(self.mirror.get('_id')),
                 'data': content_list
             }))
-        elif service in ["UpdateActiveSlide", "MirrorSlideChanged", "SlideChanged"]:
+        elif service in ["UpdateActiveSlide", "MirrorSlideChanged", "SlideChanged", "Heartbeat", "Ping"]:
             content_id = text_data_json.get('content_id')
             index = text_data_json.get('index', 0)
             current_time = time.time()
@@ -522,7 +524,9 @@ class MirrorConsumer(AsyncWebsocketConsumer):
                     {'$set': {
                         'active_content_id': cid_str,
                         'active_content_index': idx_val,
-                        'last_active_timestamp': current_time
+                        'last_active_timestamp': current_time,
+                        'sync_timestamp': current_time,
+                        'slide_start_timestamp': current_time
                     }}
                 )
                 msg = {
@@ -536,6 +540,7 @@ class MirrorConsumer(AsyncWebsocketConsumer):
                         'timestamp': current_time
                     }
                 }
+                await self.channel_layer.group_send(f"mirror_{str(self.mirror.get('_id'))}", msg)
                 await self.channel_layer.group_send("mirror_group", msg)
         elif service in ["PlaybackControl", "ControlPlayback"]:
             action = text_data_json.get('action', 'toggle')

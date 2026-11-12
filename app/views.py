@@ -29,6 +29,16 @@ def get_administrator(login_key=None):
     return None
 
 
+def serialize_doc(obj):
+    if isinstance(obj, ObjectId):
+        return str(obj)
+    if isinstance(obj, dict):
+        return {k: serialize_doc(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [serialize_doc(v) for v in obj]
+    return obj
+
+
 class Administrator(APIView):
     
     def post(self, request):
@@ -90,6 +100,8 @@ class Administrator(APIView):
             content_title = request.data.get('content_title')
             content_description = request.data.get('content_description', '')
             file_extention = request.data.get('file_extention', 'jpg')
+            mirror_id = request.data.get('mirror_id')
+            duration = request.data.get('duration')
             if not content or not content_title:
                 return Response({'status_text': 'content and content_title required', 'status_code': 400}, status=400)
 
@@ -111,16 +123,79 @@ class Administrator(APIView):
                 except Exception as e:
                     print(f'Firebase upload fallback to local URL: {e}')
 
-            content_collection.insert_one({
+            # Find mirror if mirror_id provided
+            mirror = None
+            if mirror_id:
+                try:
+                    mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id)})
+                except Exception:
+                    mirror = mirror_collection.find_one({'_id': mirror_id})
+                
+                if mirror:
+                    try:
+                        mirror_w = int(mirror.get('mirror_width', 1920))
+                        mirror_h = int(mirror.get('mirror_height', 1080))
+                        req_w = request.data.get('width')
+                        req_h = request.data.get('height')
+                        if req_w is not None and req_h is not None:
+                            if int(req_w) != mirror_w or int(req_h) != mirror_h:
+                                return Response({
+                                    'status_text': f'Media dimensions ({req_w} × {req_h} px) do not match mirror resolution ({mirror_w} × {mirror_h} px).',
+                                    'status_code': 400
+                                }, status=400)
+                    except (ValueError, TypeError):
+                        pass
+
+            new_content = {
                 "administrator_id": ObjectId(administrator_id),
+                "mirror_id": mirror['_id'] if mirror else (ObjectId(mirror_id) if mirror_id else None),
                 "content_title": content_title,
                 "content_description": content_description,
                 "content_url": content_url,
                 "content_format": file_extention,
-                "is_active": False,
-                "order": 1
+                "is_active": True,
+                "order": len(mirror.get('contents', [])) + 1 if mirror else 1
+            }
+            res = content_collection.insert_one(new_content)
+            new_content_id = res.inserted_id
+
+            if mirror:
+                contents = list(mirror.get('contents', []))
+                contents.append(new_content_id)
+                update_fields = {
+                    'contents': contents,
+                    'last_refresh_timestamp': time.time()
+                }
+                if duration:
+                    update_fields[f'content_durations.{str(new_content_id)}'] = max(1, int(duration))
+                
+                mirror_collection.update_one({'_id': mirror['_id']}, {'$set': update_fields})
+
+                # Broadcast reload event to active viewers and Virtual Screen
+                try:
+                    from channels.layers import get_channel_layer
+                    from asgiref.sync import async_to_sync
+                    channel_layer = get_channel_layer()
+                    if channel_layer:
+                        msg = {
+                            'type': 'update.mirror',
+                            'data': {
+                                'service': 'ReloadContents',
+                                'mirror_id': str(mirror['_id']),
+                                'timestamp': time.time()
+                            }
+                        }
+                        async_to_sync(channel_layer.group_send)("mirror_group", msg)
+                        async_to_sync(channel_layer.group_send)(f"mirror_{str(mirror['_id'])}", msg)
+                except Exception as e:
+                    print(f"Error broadcasting ReloadContents on AddContent: {e}")
+
+            return Response({
+                'status_text': 'ok',
+                'status_code': 200,
+                'content_url': content_url,
+                'content_id': str(new_content_id)
             })
-            return Response({'status_text': 'ok', 'status_code': 200, 'content_url': content_url})
                                  
         elif service == 'GetMyUnassignedMirrors':
             login_key = request.data.get('login_key')
@@ -133,16 +208,7 @@ class Administrator(APIView):
                 'administrator_id': {'$in': [administrator_id, str(administrator_id), ObjectId(administrator_id)]},
                 '$or': [{'site_id': None}, {'site_id': {'$exists': False}}]
             })
-            MyMirrors_list = []
-            for mirror in MyMirrors:
-                m = dict(mirror)
-                if '_id' in m:
-                    m['_id'] = str(m['_id'])
-                if 'administrator_id' in m:
-                    m['administrator_id'] = str(m['administrator_id'])
-                if 'site_id' in m and m['site_id']:
-                    m['site_id'] = str(m['site_id'])
-                MyMirrors_list.append(m)
+            MyMirrors_list = [serialize_doc(dict(mirror)) for mirror in MyMirrors]
             return Response({'status_text': 'ok', 'status_code': 200, 'data': MyMirrors_list})
 
         elif service == 'GetMyMirrors':
@@ -155,18 +221,7 @@ class Administrator(APIView):
             MyMirrors = mirror_collection.find({
                 'administrator_id': {'$in': [administrator_id, str(administrator_id), ObjectId(administrator_id)]}
             })
-            MyMirrors_list = []
-            for mirror in MyMirrors:
-                m = dict(mirror)
-                if '_id' in m:
-                    m['_id'] = str(m['_id'])
-                if 'administrator_id' in m:
-                    m['administrator_id'] = str(m['administrator_id'])
-                if 'site_id' in m and m['site_id']:
-                    m['site_id'] = str(m['site_id'])
-                if 'contents' in m:
-                    m['contents'] = [str(c) for c in m['contents']] if isinstance(m['contents'], list) else str(m['contents'])
-                MyMirrors_list.append(m)
+            MyMirrors_list = [serialize_doc(dict(mirror)) for mirror in MyMirrors]
             return Response({'status_text': 'Mirrors fetched Successfully', 'status_code': 200, 'data': MyMirrors_list})
 
         elif service == 'GetMySiteMirrors':
@@ -187,18 +242,7 @@ class Administrator(APIView):
                     query['site_id'] = site_id
 
             MyMirrors = mirror_collection.find(query)
-            MyMirrors_list = []
-            for mirror in MyMirrors:
-                m = dict(mirror)
-                if '_id' in m:
-                    m['_id'] = str(m['_id'])
-                if 'administrator_id' in m:
-                    m['administrator_id'] = str(m['administrator_id'])
-                if 'site_id' in m and m['site_id']:
-                    m['site_id'] = str(m['site_id'])
-                if 'contents' in m:
-                    m['contents'] = [str(c) for c in m['contents']] if isinstance(m['contents'], list) else str(m['contents'])
-                MyMirrors_list.append(m)
+            MyMirrors_list = [serialize_doc(dict(mirror)) for mirror in MyMirrors]
             return Response({'status_text': 'Mirrors fetched Successfully', 'status_code': 200, 'data': MyMirrors_list})
 
         elif service == 'AssignMirrorToSite':
@@ -252,7 +296,12 @@ class Administrator(APIView):
             content_id = request.data.get('content_id')
             administrator = get_administrator(login_key)
             if administrator and mirror_id and content_id:
-                mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id)})
+                mirror = None
+                try:
+                    mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id)})
+                except Exception:
+                    mirror = mirror_collection.find_one({'_id': mirror_id})
+                
                 if mirror:
                     current_contents = mirror.get('contents', [])
                     updated_contents = [
@@ -264,10 +313,46 @@ class Administrator(APIView):
                         cid for cid in current_disabled
                         if str(cid) != str(content_id)
                     ]
+                    content_durations = mirror.get('content_durations', {})
+                    if str(content_id) in content_durations:
+                        del content_durations[str(content_id)]
+
                     mirror_collection.update_one(
-                        {'_id': ObjectId(mirror_id)},
-                        {'$set': {'contents': updated_contents, 'disabled_contents': updated_disabled}}
+                        {'_id': mirror['_id']},
+                        {'$set': {
+                            'contents': updated_contents,
+                            'disabled_contents': updated_disabled,
+                            'content_durations': content_durations,
+                            'last_refresh_timestamp': time.time()
+                        }}
                     )
+
+                    # Delete content document since contents belong directly to this mirror
+                    try:
+                        c_id_obj = ObjectId(content_id)
+                    except Exception:
+                        c_id_obj = content_id
+                    content_collection.delete_one({'_id': c_id_obj})
+
+                    # Broadcast reload event to active viewers and Virtual Screen
+                    try:
+                        from channels.layers import get_channel_layer
+                        from asgiref.sync import async_to_sync
+                        channel_layer = get_channel_layer()
+                        if channel_layer:
+                            msg = {
+                                'type': 'update.mirror',
+                                'data': {
+                                    'service': 'ReloadContents',
+                                    'mirror_id': str(mirror['_id']),
+                                    'timestamp': time.time()
+                                }
+                            }
+                            async_to_sync(channel_layer.group_send)("mirror_group", msg)
+                            async_to_sync(channel_layer.group_send)(f"mirror_{str(mirror['_id'])}", msg)
+                    except Exception as e:
+                        print(f"Error broadcasting ReloadContents on RemoveContent: {e}")
+
                     return Response({'status_text': 'Content removed from mirror successfully', 'status_code': 200})
                 return Response({'status_text': 'Mirror not found', 'status_code': 404}, status=404)
             return Response({'status_text': 'Invalid key, mirror_id, or content_id', 'status_code': 400}, status=400)
@@ -353,24 +438,116 @@ class Administrator(APIView):
         elif service == 'GetContentsForThisMirror':
             login_key = request.data.get('login_key')
             mirror_id = request.data.get('mirror_id')
-            mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id)}) if mirror_id else None
+            mirror = None
+            if mirror_id:
+                try:
+                    mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id)})
+                except Exception:
+                    mirror = mirror_collection.find_one({'_id': mirror_id})
             contents = []
-            if mirror and 'contents' in mirror and isinstance(mirror['contents'], list):
-                disabled_set = {str(d) for d in mirror.get('disabled_contents', [])}
-                for cid in mirror['contents']:
-                    try:
-                        content_doc = content_collection.find_one({"_id": ObjectId(cid)})
-                        if content_doc:
-                            c = dict(content_doc)
-                            if '_id' in c:
-                                c['_id'] = str(c['_id'])
-                            if 'administrator_id' in c:
-                                c['administrator_id'] = str(c['administrator_id'])
-                            c['is_active'] = str(cid) not in disabled_set
-                            contents.append(c)
-                    except Exception:
-                        pass
-            return Response({'status_text': 'ok', 'status_code': 200, 'data': contents})
+            photo_duration = 5
+            mirror_width = 1920
+            mirror_height = 1080
+            mirror_name = 'Mirror Display'
+            if mirror:
+                photo_duration = mirror.get('photo_duration', 5)
+                mirror_width = mirror.get('mirror_width', 1920)
+                mirror_height = mirror.get('mirror_height', 1080)
+                mirror_name = mirror.get('mirror_name', 'Mirror Display')
+                content_durations = mirror.get('content_durations', {})
+                if 'contents' in mirror and isinstance(mirror['contents'], list):
+                    disabled_set = {str(d) for d in mirror.get('disabled_contents', [])}
+                    for cid in mirror['contents']:
+                        try:
+                            content_doc = content_collection.find_one({"_id": ObjectId(cid)})
+                            if content_doc:
+                                c = dict(content_doc)
+                                if '_id' in c:
+                                    c['_id'] = str(c['_id'])
+                                if 'administrator_id' in c:
+                                    c['administrator_id'] = str(c['administrator_id'])
+                                if 'mirror_id' in c and c['mirror_id']:
+                                    c['mirror_id'] = str(c['mirror_id'])
+                                c['is_active'] = str(cid) not in disabled_set
+                                c['duration'] = int(content_durations.get(str(cid), photo_duration))
+                                contents.append(c)
+                        except Exception:
+                            pass
+            return Response({
+                'status_text': 'ok',
+                'status_code': 200,
+                'photo_duration': photo_duration,
+                'mirror_width': mirror_width,
+                'mirror_height': mirror_height,
+                'mirror_name': mirror_name,
+                'data': contents
+            })
+
+        elif service in ['UpdatePhotoSpeed', 'SetPhotoSpeed', 'UpdateMirrorSpeed', 'SetMirrorSpeed']:
+            login_key = request.data.get('login_key')
+            mirror_id = request.data.get('mirror_id')
+            photo_duration = request.data.get('photo_duration')
+            content_id = request.data.get('content_id')
+            duration = request.data.get('duration')
+            
+            administrator = get_administrator(login_key)
+            if not mirror_id or not administrator:
+                return Response({'status_text': 'Unauthorized or missing mirror_id', 'status_code': 400}, status=400)
+            
+            mirror = None
+            try:
+                mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id)})
+            except Exception:
+                mirror = mirror_collection.find_one({'_id': mirror_id})
+            
+            if not mirror:
+                return Response({'status_text': 'Mirror not found', 'status_code': 404}, status=404)
+            
+            current_time = time.time()
+            update_fields = {'last_refresh_timestamp': current_time}
+            
+            if photo_duration is not None:
+                try:
+                    update_fields['photo_duration'] = max(1, int(photo_duration))
+                except Exception:
+                    pass
+            
+            if content_id and duration is not None:
+                try:
+                    update_fields[f'content_durations.{str(content_id)}'] = max(1, int(duration))
+                except Exception:
+                    pass
+
+            mirror_collection.update_one({'_id': mirror['_id']}, {'$set': update_fields})
+            
+            # Broadcast WebSocket event to connected mirrors
+            try:
+                from channels.layers import get_channel_layer
+                from asgiref.sync import async_to_sync
+                channel_layer = get_channel_layer()
+                if channel_layer:
+                    msg = {
+                        'type': 'update.mirror',
+                        'data': {
+                            'service': 'UpdateSettings',
+                            'mirror_id': str(mirror['_id']),
+                            'photo_duration': update_fields.get('photo_duration', mirror.get('photo_duration', 5)),
+                            'content_id': str(content_id) if content_id else None,
+                            'duration': int(duration) if duration is not None else None,
+                            'timestamp': current_time
+                        }
+                    }
+                    async_to_sync(channel_layer.group_send)("mirror_group", msg)
+            except Exception as e:
+                print("Error broadcasting settings update:", e)
+
+            return Response({
+                'status_text': 'Photo speed updated successfully',
+                'status_code': 200,
+                'photo_duration': update_fields.get('photo_duration', mirror.get('photo_duration', 5)),
+                'content_id': str(content_id) if content_id else None,
+                'duration': int(duration) if duration is not None else None
+            }, status=200)
 
         elif service in ['ToggleContentStatusOnMirror', 'SetContentMirrorStatus']:
             login_key = request.data.get('login_key')
@@ -461,28 +638,15 @@ class Administrator(APIView):
             content_id = request.data.get('content_id')
             content = content_collection.find_one({'_id': ObjectId(content_id)}) if content_id else None
             if content:
-                c = dict(content)
-                if '_id' in c:
-                    c['_id'] = str(c['_id'])
-                if 'administrator_id' in c:
-                    c['administrator_id'] = str(c['administrator_id'])
-                return Response({'status_text': 'ok', 'status_code': 200, 'data': c})
+                return Response({'status_text': 'ok', 'status_code': 200, 'data': serialize_doc(dict(content))})
             return Response({'status_text': 'Not found', 'status_code': 404}, status=404)
         
         elif service == 'GetMirrorDetails':
             mirror_id = request.data.get('mirror_id')
             mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id)}) if mirror_id else None
             if mirror:
-                m = dict(mirror)
-                if '_id' in m:
-                    m['_id'] = str(m['_id'])
-                if 'administrator_id' in m:
-                    m['administrator_id'] = str(m['administrator_id'])
-                if 'site_id' in m and m['site_id']:
-                    m['site_id'] = str(m['site_id'])
-                if 'contents' in m and isinstance(m['contents'], list):
-                    m['contents'] = [str(c) for c in m['contents']]
-                return Response({'status_text': 'ok', 'status_code': 200, 'data': m})
+                return Response({'status_text': 'ok', 'status_code': 200, 'data': serialize_doc(dict(mirror))})
+            return Response({'status_text': 'Not found', 'status_code': 404}, status=404)
             return Response({'status_text': 'Not found', 'status_code': 404}, status=404)
         
         elif service == 'AddSite':
@@ -516,8 +680,16 @@ class Administrator(APIView):
             password = request.data.get('password', '')
             mirror_height = request.data.get('height', '1080')
             mirror_width = request.data.get('width', '1920')
+            site_id = request.data.get('site_id')
 
-            mirror_collection.insert_one({
+            site_obj_id = None
+            if site_id:
+                try:
+                    site_obj_id = ObjectId(site_id)
+                except Exception:
+                    site_obj_id = site_id
+
+            res = mirror_collection.insert_one({
                 "username": username,
                 "password": password,
                 "administrator_id": ObjectId(administrator_id),
@@ -525,10 +697,11 @@ class Administrator(APIView):
                 "mirror_description": mirror_description,
                 "mirror_height": mirror_height,
                 "mirror_width": mirror_width,
-                "site_id": None,
+                "site_id": site_obj_id,
+                "playback_state": "playing",
                 "contents": []
             })
-            return Response({'status_code': 200, 'status_text': 'ok'})
+            return Response({'status_code': 200, 'status_text': 'ok', 'mirror_id': str(res.inserted_id)})
 
         elif service == 'DeleteMirror':
             login_key = request.data.get('login_key')
@@ -673,7 +846,7 @@ class Administrator(APIView):
             current_time = time.time()
             mirror_collection.update_one(
                 {'_id': mirror.get('_id')},
-                {'$set': {'playback_state': new_state, 'last_state_change_timestamp': current_time}}
+                {'$set': {'playback_state': new_state, 'last_state_change_timestamp': current_time, 'last_active_timestamp': current_time}}
             )
 
             try:
@@ -716,20 +889,33 @@ class Administrator(APIView):
             if not mirror:
                 return Response({'status_text': 'Mirror not found', 'status_code': 404}, status=404)
             
-            last_active = mirror.get('last_active_timestamp', 0)
-            is_online = bool(last_active and (time.time() - last_active < 45))
+            current_time = time.time()
+            # Virtual screen is a default mirror that is always logged in and continuously running
+            mirror_collection.update_one({'_id': mirror.get('_id')}, {'$set': {'last_active_timestamp': current_time}})
+            last_active = current_time
+            is_online = True
 
             return Response({
                 'status_text': 'ok',
                 'status_code': 200,
                 'data': {
                     'mirror_id': str(mirror.get('_id')),
+                    'mirror_name': mirror.get('mirror_name', 'Mirror Display'),
+                    'mirror_description': mirror.get('mirror_description', ''),
+                    'mirror_width': mirror.get('mirror_width', 1920),
+                    'mirror_height': mirror.get('mirror_height', 1080),
+                    'username': mirror.get('username', ''),
+                    'password': mirror.get('password', ''),
                     'active_content_id': mirror.get('active_content_id'),
                     'active_content_index': mirror.get('active_content_index', 0),
-                    'playback_state': mirror.get('playback_state', 'playing'),
+                    'playback_state': mirror.get('playback_state') or 'playing',
                     'last_active_timestamp': last_active,
                     'last_refresh_timestamp': mirror.get('last_refresh_timestamp', 0),
-                    'is_online': is_online
+                    'sync_timestamp': mirror.get('sync_timestamp', 0),
+                    'slide_start_timestamp': mirror.get('slide_start_timestamp', 0),
+                    'photo_duration': mirror.get('photo_duration', 5),
+                    'is_online': is_online,
+                    'server_time': current_time
                 }
             }, status=200)
 
@@ -755,7 +941,7 @@ class Administrator(APIView):
 
             mirror_collection.update_one(
                 {'_id': mirror.get('_id')},
-                {'$set': {'sync_timestamp': current_time, 'active_content_index': sync_index, 'active_content_id': sync_cid}}
+                {'$set': {'sync_timestamp': current_time, 'active_content_index': sync_index, 'active_content_id': sync_cid, 'last_active_timestamp': current_time}}
             )
 
             site_id = mirror.get('site_id')
@@ -815,6 +1001,8 @@ class Mirror(APIView):
             password = request.data.get('password')
             mirror = mirror_collection.find_one({"username": username, "password": password})
             if mirror:
+                photo_duration = mirror.get('photo_duration', 5)
+                content_durations = mirror.get('content_durations', {})
                 disabled_set = {str(d) for d in mirror.get('disabled_contents', [])}
                 content_list = []
                 for cid in mirror.get('contents', []):
@@ -832,10 +1020,11 @@ class Mirror(APIView):
                                 c['site_id'] = str(c['site_id'])
                             if 'administrator_id' in c:
                                 c['administrator_id'] = str(c['administrator_id'])
+                            c['duration'] = int(content_durations.get(str(cid), photo_duration))
                             content_list.append(c)
                     except Exception:
                         pass
-                return Response({'status_text': 'ok', 'status_code': 200, 'data': content_list})
+                return Response({'status_text': 'ok', 'status_code': 200, 'photo_duration': photo_duration, 'data': content_list})
             return Response({'status_text': 'Username or Password do not Exist', 'status_code': 401}, status=401)
             
         elif service == 'register':
@@ -888,6 +1077,8 @@ class Mirror(APIView):
                 return Response({'status_text': 'Mirror not found', 'status_code': 404}, status=404)
             
             disabled_set = {str(d) for d in mirror.get('disabled_contents', [])}
+            content_durations = mirror.get('content_durations', {})
+            photo_duration = mirror.get('photo_duration', 5)
             content_list = []
             for cid in mirror.get('contents', []):
                 if str(cid) in disabled_set:
@@ -900,6 +1091,7 @@ class Mirror(APIView):
                         if 'mirror_id' in c and c['mirror_id']: c['mirror_id'] = str(c['mirror_id'])
                         if 'site_id' in c and c['site_id']: c['site_id'] = str(c['site_id'])
                         if 'administrator_id' in c: c['administrator_id'] = str(c['administrator_id'])
+                        c['duration'] = int(content_durations.get(str(cid), photo_duration))
                         content_list.append(c)
                 except Exception:
                     pass
@@ -913,6 +1105,7 @@ class Mirror(APIView):
                 'last_refresh_timestamp': mirror.get('last_refresh_timestamp', 0),
                 'mirror_id': str(mirror.get('_id')),
                 'playback_state': mirror.get('playback_state', 'playing'),
+                'photo_duration': photo_duration,
                 'active_content_id': mirror.get('active_content_id'),
                 'active_content_index': mirror.get('active_content_index', 0),
                 'sync_timestamp': mirror.get('sync_timestamp', 0),
@@ -950,7 +1143,9 @@ class Mirror(APIView):
                 {'$set': {
                     'active_content_id': cid_str,
                     'active_content_index': idx_val,
-                    'last_active_timestamp': current_time
+                    'last_active_timestamp': current_time,
+                    'sync_timestamp': current_time,
+                    'slide_start_timestamp': current_time
                 }}
             )
 
@@ -971,6 +1166,7 @@ class Mirror(APIView):
                             'timestamp': current_time
                         }
                     }
+                    async_to_sync(channel_layer.group_send)(f"mirror_{str(mirror.get('_id'))}", msg)
                     async_to_sync(channel_layer.group_send)("mirror_group", msg)
             except Exception:
                 pass
@@ -980,7 +1176,8 @@ class Mirror(APIView):
                 'status_code': 200,
                 'mirror_id': str(mirror.get('_id')),
                 'active_content_id': cid_str,
-                'active_content_index': idx_val
+                'active_content_index': idx_val,
+                'sync_timestamp': current_time
             }, status=200)
 
         return Response({'status_text': 'Unknown service', 'status_code': 400}, status=400)

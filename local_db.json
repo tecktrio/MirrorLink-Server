@@ -53,31 +53,70 @@
       },
       "contents": [
         {
-          "$oid": "6af5666e2d88146783a23832"
+          "$oid": "6af55d572d88146783a23828"
         },
         {
-          "$oid": "6af578a245971c4bc20529d3"
+          "$oid": "6af5666e2d88146783a23832"
         },
         {
           "$oid": "6af57615840ce0aa5e28701b"
         },
         {
-          "$oid": "6af55d572d88146783a23828"
+          "$oid": "6af5b29a10cc8737d989927c"
         }
       ],
       "_id": {
         "$oid": "6af55a31e3ee10acbfe0a734"
       },
-      "websocket_channel_name": "specific..inmemory!YnrMpLhDynyk",
+      "websocket_channel_name": "specific..inmemory!DZgJpxXYmhmY",
       "mirror_login_return_key": "lobbypwd",
-      "last_refresh_timestamp": 1794474501.003774,
-      "last_active_timestamp": 1794474752.0951848,
+      "last_refresh_timestamp": 1794488112.427084,
+      "last_active_timestamp": 1794488259.873622,
       "playback_state": "playing",
-      "last_state_change_timestamp": 1794474417.573571,
-      "active_content_id": "6af57615840ce0aa5e28701b",
-      "active_content_index": 2,
-      "sync_timestamp": 1794474483.807113,
-      "disabled_contents": []
+      "last_state_change_timestamp": 1794488073.600412,
+      "active_content_id": "6af5666e2d88146783a23832",
+      "active_content_index": 1,
+      "sync_timestamp": 1794488259.873622,
+      "disabled_contents": [
+        {
+          "$oid": "6af57615840ce0aa5e28701b"
+        },
+        {
+          "$oid": "6af5b29a10cc8737d989927c"
+        }
+      ],
+      "photo_duration": 3,
+      "content_durations": {
+        "6af57615840ce0aa5e28701b": 15,
+        "6af5666e2d88146783a23832": 4,
+        "6af55d572d88146783a23828": 2
+      },
+      "slide_start_timestamp": 1794488259.856951
+    },
+    {
+      "username": "test",
+      "password": "test",
+      "administrator_id": {
+        "$oid": "672f00000000000000000001"
+      },
+      "mirror_name": "test",
+      "mirror_description": "",
+      "mirror_height": "1920",
+      "mirror_width": "1080",
+      "site_id": {
+        "$oid": "6af55a21e3ee10acbfe0a733"
+      },
+      "contents": [],
+      "_id": {
+        "$oid": "6af5b16925c1b5eaa400ecd1"
+      },
+      "websocket_channel_name": "specific..inmemory!KihhahFzwTNY",
+      "mirror_login_return_key": "testtest",
+      "last_active_timestamp": 1794487118.31692,
+      "active_content_id": "6af5666e2d88146783a23832",
+      "active_content_index": 1,
+      "sync_timestamp": 1794488259.873622,
+      "slide_start_timestamp": 1794486739.546913
     }
   ],
   "content": [
@@ -155,14 +194,17 @@
       "administrator_id": {
         "$oid": "672f00000000000000000001"
       },
-      "content_title": "qr",
+      "mirror_id": {
+        "$oid": "6af55a31e3ee10acbfe0a734"
+      },
+      "content_title": "Valid Dim Test Content",
       "content_description": "",
-      "content_url": "http://127.0.0.1:8000/Contents/qr_672f00000000000000000001.jpeg",
-      "content_format": "jpeg",
-      "is_active": false,
-      "order": 1,
+      "content_url": "http://127.0.0.1:8000/Contents/Valid Dim Test Content_672f00000000000000000001.jpg",
+      "content_format": "jpg",
+      "is_active": true,
+      "order": 4,
       "_id": {
-        "$oid": "6af578a245971c4bc20529d3"
+        "$oid": "6af5b29a10cc8737d989927c"
       }
     }
   ]
