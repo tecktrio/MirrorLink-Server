@@ -137,7 +137,9 @@ class Administrator(APIView):
                         mirror_h = int(mirror.get('mirror_height', 1080))
                         req_w = request.data.get('width')
                         req_h = request.data.get('height')
-                        if req_w is not None and req_h is not None:
+                        # Strict resolution matching is required for images; videos are auto-scaled and play natively
+                        is_video = str(file_extention).lower() in ['mp4', 'mov', 'webm', 'm4v']
+                        if not is_video and req_w is not None and req_h is not None:
                             if int(req_w) != mirror_w or int(req_h) != mirror_h:
                                 return Response({
                                     'status_text': f'Media dimensions ({req_w} × {req_h} px) do not match mirror resolution ({mirror_w} × {mirror_h} px).',
@@ -674,10 +676,22 @@ class Administrator(APIView):
                 return Response({'status_code': 401, 'status_text': 'invalid key'}, status=401)
             
             administrator_id = administrator.get('_id')
-            mirror_name = request.data.get('mirror_name', '')
-            mirror_description = request.data.get('mirror_description', '')
-            username = request.data.get('username', '')
-            password = request.data.get('password', '')
+            mirror_name = request.data.get('mirror_name', '').strip()
+            if not mirror_name:
+                return Response({'status_code': 400, 'status_text': 'Mirror Name is required.'}, status=400)
+
+            # Mirror names must be unique across the system for direct streaming
+            import re
+            existing_mirror = mirror_collection.find_one({
+                'mirror_name': {'$regex': f'^{re.escape(mirror_name)}$', '$options': 'i'}
+            })
+            if existing_mirror:
+                return Response({
+                    'status_code': 400,
+                    'status_text': f'A mirror with the name "{mirror_name}" already exists. Mirror names must be unique for streaming.'
+                }, status=400)
+
+            mirror_description = request.data.get('mirror_description', '').strip()
             mirror_height = request.data.get('height', '1080')
             mirror_width = request.data.get('width', '1920')
             site_id = request.data.get('site_id')
@@ -689,16 +703,18 @@ class Administrator(APIView):
                 except Exception:
                     site_obj_id = site_id
 
+            current_time = time.time()
             res = mirror_collection.insert_one({
-                "username": username,
-                "password": password,
-                "administrator_id": ObjectId(administrator_id),
                 "mirror_name": mirror_name,
                 "mirror_description": mirror_description,
+                "username": mirror_name,
+                "password": "",
+                "administrator_id": ObjectId(administrator_id),
                 "mirror_height": mirror_height,
                 "mirror_width": mirror_width,
                 "site_id": site_obj_id,
                 "playback_state": "playing",
+                "last_active_timestamp": current_time,
                 "contents": []
             })
             return Response({'status_code': 200, 'status_text': 'ok', 'mirror_id': str(res.inserted_id)})
@@ -997,10 +1013,40 @@ class Mirror(APIView):
             return Response({'status_code': 400, 'status_text': 'Required service'}, status=400)
 
         if service == 'login':
+            mirror_name = request.data.get('mirror_name')
+            mirror_id = request.data.get('mirror_id')
             username = request.data.get('username')
             password = request.data.get('password')
-            mirror = mirror_collection.find_one({"username": username, "password": password})
+            mirror = None
+
+            if mirror_name:
+                import re
+                clean_name = str(mirror_name).strip()
+                mirror = mirror_collection.find_one({'mirror_name': clean_name})
+                if not mirror:
+                    mirror = mirror_collection.find_one({'mirror_name': {'$regex': f'^{re.escape(clean_name)}$', '$options': 'i'}})
+
+            if not mirror and mirror_id:
+                try:
+                    mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id)})
+                except Exception:
+                    mirror = mirror_collection.find_one({'_id': mirror_id})
+
+            if not mirror and username and password:
+                mirror = mirror_collection.find_one({"username": username, "password": password})
+
+            if not mirror and username:
+                clean_u = str(username).strip()
+                mirror = mirror_collection.find_one({'mirror_name': clean_u})
+                if not mirror:
+                    mirror = mirror_collection.find_one({'username': clean_u})
+
             if mirror:
+                current_time = time.time()
+                mirror_collection.update_one(
+                    {'_id': mirror.get('_id')},
+                    {'$set': {'last_active_timestamp': current_time}}
+                )
                 photo_duration = mirror.get('photo_duration', 5)
                 content_durations = mirror.get('content_durations', {})
                 disabled_set = {str(d) for d in mirror.get('disabled_contents', [])}
@@ -1024,8 +1070,18 @@ class Mirror(APIView):
                             content_list.append(c)
                     except Exception:
                         pass
-                return Response({'status_text': 'ok', 'status_code': 200, 'photo_duration': photo_duration, 'data': content_list})
-            return Response({'status_text': 'Username or Password do not Exist', 'status_code': 401}, status=401)
+                return Response({
+                    'status_text': 'ok',
+                    'status_code': 200,
+                    'mirror_id': str(mirror.get('_id')),
+                    'mirror_name': mirror.get('mirror_name', ''),
+                    'photo_duration': photo_duration,
+                    'active_content_index': mirror.get('active_content_index', 0),
+                    'sync_timestamp': mirror.get('last_sync_timestamp', 0),
+                    'playback_state': mirror.get('playback_state', 'playing'),
+                    'data': content_list
+                })
+            return Response({'status_text': 'Mirror display not found. Check the mirror name.', 'status_code': 404}, status=404)
             
         elif service == 'register':
             required_data = ['username', 'password', 'site_name', 'administrator_username', 'mirror_name']
@@ -1057,16 +1113,28 @@ class Mirror(APIView):
                 return Response({'status_text': 'Registered Successfully', 'status_code': 200})
             return Response({'status_text': 'UnAuthorised', 'status_code': 401}, status=401)
 
-        elif service in ['CheckMirrorUpdate', 'GetMirrorUpdate', 'GetMirrorContents']:
+        elif service in ['CheckMirrorUpdate', 'GetMirrorUpdate', 'GetMirrorContents', 'login', 'ConnectMirror', 'StreamMirror']:
+            mirror_name = request.data.get('mirror_name')
             username = request.data.get('username')
             password = request.data.get('password')
             mirror_id = request.data.get('mirror_id')
             mirror = None
-            if mirror_id:
+            if mirror_name:
+                import re
+                clean_name = str(mirror_name).strip()
+                mirror = mirror_collection.find_one({'mirror_name': clean_name})
+                if not mirror:
+                    mirror = mirror_collection.find_one({'mirror_name': {'$regex': f'^{re.escape(clean_name)}$', '$options': 'i'}})
+            if not mirror and mirror_id:
                 try:
                     mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id)})
                 except Exception:
                     mirror = mirror_collection.find_one({'_id': mirror_id})
+            if not mirror and username:
+                clean_u = str(username).strip()
+                mirror = mirror_collection.find_one({'mirror_name': clean_u})
+                if not mirror:
+                    mirror = mirror_collection.find_one({'username': clean_u})
             if not mirror and username and password:
                 mirror = mirror_collection.find_one({'username': username, 'password': password})
             if not mirror and (username or password):
@@ -1074,7 +1142,7 @@ class Mirror(APIView):
                 mirror = mirror_collection.find_one({'mirror_login_return_key': client_key})
             
             if not mirror:
-                return Response({'status_text': 'Mirror not found', 'status_code': 404}, status=404)
+                return Response({'status_text': 'Mirror not found. Check mirror name.', 'status_code': 404}, status=404)
             
             disabled_set = {str(d) for d in mirror.get('disabled_contents', [])}
             content_durations = mirror.get('content_durations', {})
@@ -1113,6 +1181,7 @@ class Mirror(APIView):
             }, status=200)
 
         elif service in ['UpdateActiveSlide', 'ReportActiveSlide', 'SlideChanged']:
+            mirror_name = request.data.get('mirror_name')
             mirror_id = request.data.get('mirror_id')
             username = request.data.get('username')
             password = request.data.get('password')
@@ -1120,11 +1189,22 @@ class Mirror(APIView):
             index = request.data.get('index', 0)
 
             mirror = None
-            if mirror_id:
+            if mirror_name:
+                import re
+                clean_name = str(mirror_name).strip()
+                mirror = mirror_collection.find_one({'mirror_name': clean_name})
+                if not mirror:
+                    mirror = mirror_collection.find_one({'mirror_name': {'$regex': f'^{re.escape(clean_name)}$', '$options': 'i'}})
+            if not mirror and mirror_id:
                 try:
                     mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id)})
                 except Exception:
                     mirror = mirror_collection.find_one({'_id': mirror_id})
+            if not mirror and username:
+                clean_u = str(username).strip()
+                mirror = mirror_collection.find_one({'mirror_name': clean_u})
+                if not mirror:
+                    mirror = mirror_collection.find_one({'username': clean_u})
             if not mirror and username and password:
                 mirror = mirror_collection.find_one({'username': username, 'password': password})
             if not mirror and (username or password):

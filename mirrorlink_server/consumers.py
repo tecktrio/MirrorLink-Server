@@ -405,11 +405,19 @@ class MirrorConsumer(AsyncWebsocketConsumer):
         params = dict(qc.split("=") for qc in query_string.split("&") if "=" in qc)
         client_key = params.get('key')
         mirror_id_param = params.get('mirror_id')
+        mirror_name_param = params.get('mirror_name')
         username = params.get('username')
         password = params.get('password')
 
         mirror = None
-        if mirror_id_param:
+        if mirror_name_param:
+            import urllib.parse, re
+            decoded_name = urllib.parse.unquote(mirror_name_param).strip()
+            mirror = mirror_collection.find_one({'mirror_name': decoded_name})
+            if not mirror:
+                mirror = mirror_collection.find_one({'mirror_name': {'$regex': f'^{re.escape(decoded_name)}$', '$options': 'i'}})
+
+        if not mirror and mirror_id_param:
             try:
                 mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id_param)})
             except Exception:
@@ -449,8 +457,11 @@ class MirrorConsumer(AsyncWebsocketConsumer):
             await self.accept()
 
             mirror_id_str = str(self.mirror.get('_id'))
+            mirror_name_str = str(self.mirror.get('mirror_name', ''))
             await self.channel_layer.group_add("mirror_group", self.channel_name)
             await self.channel_layer.group_add(f"mirror_{mirror_id_str}", self.channel_name)
+            if mirror_name_str:
+                await self.channel_layer.group_add(f"mirror_{mirror_name_str}", self.channel_name)
 
             disabled_set = {str(d) for d in self.mirror.get('disabled_contents', [])}
             content_list = []
@@ -480,7 +491,10 @@ class MirrorConsumer(AsyncWebsocketConsumer):
     async def disconnect(self, code):
         if hasattr(self, 'mirror') and self.mirror:
             mirror_id_str = str(self.mirror.get('_id'))
+            mirror_name_str = str(self.mirror.get('mirror_name', ''))
             await self.channel_layer.group_discard(f"mirror_{mirror_id_str}", self.channel_name)
+            if mirror_name_str:
+                await self.channel_layer.group_discard(f"mirror_{mirror_name_str}", self.channel_name)
             await self.channel_layer.group_discard("mirror_group", self.channel_name)
         return await super().disconnect(code)
 
