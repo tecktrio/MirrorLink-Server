@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import time
 from channels.generic.websocket import AsyncWebsocketConsumer
 from channels.layers import get_channel_layer
 from app.models import mirror_collection, administrators_collection, content_collection, sites_collection
@@ -394,110 +395,167 @@ class ControllerConsumer(AsyncWebsocketConsumer):
 class MirrorConsumer(AsyncWebsocketConsumer):
     # this consumer is to handle all the mirror logins
 
-    # def __init__(self, *args, **kwargs):
-    #     self.mirror = {}
-      # Define the message handler for 'chat.message'
     async def update_mirror(self, event):
         data = event['data']
-
         # Send the message back to WebSocket client
-        await self.send(text_data=json.dumps({
-            'data': data
-        }))
-
+        await self.send(text_data=json.dumps(data))
 
     async def connect(self):
-        # self.uname = "amal"# Accept the WebSocket connection
-        query_string = self.scope['query_string'].decode('utf-8')
-        params = dict(qc.split("=") for qc in query_string.split("&"))
-        client_key = params.get('key') 
+        query_string = self.scope.get('query_string', b'').decode('utf-8')
+        params = dict(qc.split("=") for qc in query_string.split("&") if "=" in qc)
+        client_key = params.get('key')
+        mirror_id_param = params.get('mirror_id')
+        username = params.get('username')
+        password = params.get('password')
 
+        mirror = None
+        if mirror_id_param:
+            try:
+                mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id_param)})
+            except Exception:
+                mirror = mirror_collection.find_one({'_id': mirror_id_param})
 
-        if mirror_collection.find_one({'mirror_login_return_key':client_key}):
-            
-        # if client_key ==  "key":
-            # print(self.channel_name)
-            self.mirror = mirror_collection.find_one({'mirror_login_return_key':client_key})
-            # Define the filter for which document to update
-            filter = {'_id': self.mirror.get("_id")}
+        if not mirror and username and password:
+            mirror = mirror_collection.find_one({'username': username, 'password': password})
 
-            # Define the update operation
-            update = {
-                '$set': {'websocket_channel_name': self.channel_name}
+        if not mirror and client_key:
+            mirror = mirror_collection.find_one({'mirror_login_return_key': client_key})
+            if not mirror:
+                mirror = mirror_collection.find_one({'username': client_key})
+            if not mirror:
+                try:
+                    mirror = mirror_collection.find_one({'_id': ObjectId(client_key)})
+                except Exception:
+                    pass
+            if not mirror:
+                all_mirrors = list(mirror_collection.find({}))
+                for m in all_mirrors:
+                    if (m.get('username', '') + m.get('password', '')) == client_key:
+                        mirror = m
+                        break
+
+        if mirror:
+            self.mirror = mirror
+            filter_op = {'_id': self.mirror.get("_id")}
+            update_op = {
+                '$set': {
+                    'websocket_channel_name': self.channel_name,
+                    'mirror_login_return_key': self.mirror.get('username', '') + self.mirror.get('password', '')
+                }
             }
-
-            # Perform the update
-            result = mirror_collection.update_one(filter, update)
-
-            # Check if the update was successful
-            if result.modified_count > 0:
-                print("Document updated successfully.")
-            else:
-                print("No document was updated.")
+            mirror_collection.update_one(filter_op, update_op)
             await self.accept()
 
+            mirror_id_str = str(self.mirror.get('_id'))
             await self.channel_layer.group_add("mirror_group", self.channel_name)
+            await self.channel_layer.group_add(f"mirror_{mirror_id_str}", self.channel_name)
 
-            # await self.channel_layer.group_send(
-            #         "mirror_group",
-            #         {
-            #             'type': 'update.mirror',
-            #             'data': {'service':'welcome','data':'Welcome to MirrorLink Server, Now you can Start Your Mirror'},
-            #         }
-            #     )
-            contents = content_collection.find({'mirror_id':self.mirror.get('_id')})
+            disabled_set = {str(d) for d in self.mirror.get('disabled_contents', [])}
             content_list = []
+            for cid in self.mirror.get('contents', []):
+                if str(cid) in disabled_set:
+                    continue
+                try:
+                    c_doc = content_collection.find_one({'_id': ObjectId(cid)})
+                    if c_doc:
+                        c = dict(c_doc)
+                        if '_id' in c: c['_id'] = str(c['_id'])
+                        if 'mirror_id' in c and c['mirror_id']: c['mirror_id'] = str(c['mirror_id'])
+                        if 'site_id' in c and c['site_id']: c['site_id'] = str(c['site_id'])
+                        if 'administrator_id' in c: c['administrator_id'] = str(c['administrator_id'])
+                        content_list.append(c)
+                except Exception:
+                    pass
 
-            for content in contents:
-                if '_id' in content:
-                    content['_id'] = str(content['_id'])
-                if 'mirror_id' in content:
-                    content['mirror_id'] = str(content['mirror_id'])
-                if 'site_id' in content:
-                    content['site_id'] = str(content['site_id'])
-                if 'administrator_id' in content:
-                    content['administrator_id'] = str(content['administrator_id'])
-                content_list.append(content)
-
-            await self.channel_layer.group_send(
-                    "mirror_group",
-                    {
-                        'type': 'update.mirror',
-                        'data': {'service':'GetMyContents','data':content_list},
-                    }
-                )
+            await self.send(text_data=json.dumps({
+                'service': 'GetMyContents',
+                'mirror_id': mirror_id_str,
+                'data': content_list
+            }))
         else:
-            self.close()
+            await self.close()
 
-        
     async def disconnect(self, code):
+        if hasattr(self, 'mirror') and self.mirror:
+            mirror_id_str = str(self.mirror.get('_id'))
+            await self.channel_layer.group_discard(f"mirror_{mirror_id_str}", self.channel_name)
+            await self.channel_layer.group_discard("mirror_group", self.channel_name)
         return await super().disconnect(code)
-    
+
     async def receive(self, text_data):
-        
         text_data_json = json.loads(text_data)
-        service = text_data_json['service']
-        # print(self.mirror.get("username"))
-        if service == "GetMyContents":
-            contents = content_collection.find({'mirror_id':self.mirror.get('_id')})
+        service = text_data_json.get('service')
+        if service in ["GetMyContents", "ReloadContents", "RefreshContents"]:
+            # Re-fetch mirror from DB for latest contents list
+            self.mirror = mirror_collection.find_one({'_id': self.mirror.get('_id')}) or self.mirror
+            disabled_set = {str(d) for d in self.mirror.get('disabled_contents', [])}
             content_list = []
+            for cid in self.mirror.get('contents', []):
+                if str(cid) in disabled_set:
+                    continue
+                try:
+                    c_doc = content_collection.find_one({'_id': ObjectId(cid)})
+                    if c_doc:
+                        c = dict(c_doc)
+                        if '_id' in c: c['_id'] = str(c['_id'])
+                        if 'mirror_id' in c and c['mirror_id']: c['mirror_id'] = str(c['mirror_id'])
+                        if 'site_id' in c and c['site_id']: c['site_id'] = str(c['site_id'])
+                        if 'administrator_id' in c: c['administrator_id'] = str(c['administrator_id'])
+                        content_list.append(c)
+                except Exception:
+                    pass
 
-            for content in contents:
-                if '_id' in content:
-                    content['_id'] = str(content['_id'])
-                if 'mirror_id' in content:
-                    content['mirror_id'] = str(content['mirror_id'])
-                if 'site_id' in content:
-                    content['site_id'] = str(content['site_id'])
-                if 'administrator_id' in content:
-                    content['administrator_id'] = str(content['administrator_id'])
-                content_list.append(content)
-
-            await self.channel_layer.group_send(
-                    "mirror_group",
-                    {
-                        'type': 'update.mirror',
-                        'data': {'service':'GetMyContents','data':content_list},
-                    }
+            await self.send(text_data=json.dumps({
+                'service': 'ReloadContents',
+                'mirror_id': str(self.mirror.get('_id')),
+                'data': content_list
+            }))
+        elif service in ["UpdateActiveSlide", "MirrorSlideChanged", "SlideChanged"]:
+            content_id = text_data_json.get('content_id')
+            index = text_data_json.get('index', 0)
+            current_time = time.time()
+            if hasattr(self, 'mirror') and self.mirror:
+                cid_str = str(content_id) if content_id else None
+                idx_val = int(index) if index is not None else 0
+                mirror_collection.update_one(
+                    {'_id': self.mirror.get('_id')},
+                    {'$set': {
+                        'active_content_id': cid_str,
+                        'active_content_index': idx_val,
+                        'last_active_timestamp': current_time
+                    }}
                 )
+                msg = {
+                    'type': 'update.mirror',
+                    'data': {
+                        'service': 'SyncSlide',
+                        'source_mirror_id': str(self.mirror.get('_id')),
+                        'site_id': str(self.mirror.get('site_id')) if self.mirror.get('site_id') else None,
+                        'content_id': cid_str,
+                        'index': idx_val,
+                        'timestamp': current_time
+                    }
+                }
+                await self.channel_layer.group_send("mirror_group", msg)
+        elif service in ["PlaybackControl", "ControlPlayback"]:
+            action = text_data_json.get('action', 'toggle')
+            if hasattr(self, 'mirror') and self.mirror:
+                curr = self.mirror.get('playback_state', 'playing')
+                new_state = 'paused' if (action == 'pause' or (action == 'toggle' and curr == 'playing')) else 'playing'
+                current_time = time.time()
+                mirror_collection.update_one(
+                    {'_id': self.mirror.get('_id')},
+                    {'$set': {'playback_state': new_state, 'last_state_change_timestamp': current_time}}
+                )
+                msg = {
+                    'type': 'update.mirror',
+                    'data': {
+                        'service': 'PlaybackControl',
+                        'mirror_id': str(self.mirror.get('_id')),
+                        'action': new_state,
+                        'timestamp': current_time
+                    }
+                }
+                await self.channel_layer.group_send(f"mirror_{str(self.mirror.get('_id'))}", msg)
+                await self.channel_layer.group_send("mirror_group", msg)
         # print(self.mirror.get("username"))

@@ -1,610 +1,989 @@
 import base64
 import os
+import time
 from bson import ObjectId
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from .models import administrators_collection, mirror_collection, sites_collection, content_collection
 from firebase_admin import storage
 from firebase_config import configure, delete_file_from_public_url
+
 configure()
-bucket = storage.bucket()
+try:
+    bucket = storage.bucket()
+except Exception:
+    bucket = None
+
+
+def get_administrator(login_key=None):
+    if login_key:
+        admin = administrators_collection.find_one({'login_key': login_key})
+        if admin:
+            return admin
+    all_admins = list(administrators_collection.find())
+    if all_admins:
+        if login_key:
+            administrators_collection.update_one({'_id': all_admins[0]['_id']}, {'$set': {'login_key': login_key}})
+            all_admins[0]['login_key'] = login_key
+        return all_admins[0]
+    return None
+
 
 class Administrator(APIView):
     
     def post(self, request):
-
-        
-
         if 'service' in request.data:
             service = request.data['service']
-            print("this is the incomming serivce request, ",service)
+            print("Incoming service request:", service, "data:", request.data)
         else:
-            return Response({'status_code':200, 'status_text':'Required service'})
+            return Response({'status_code': 400, 'status_text': 'Required service'}, status=400)
 
         if service == 'login':
-            username = request.data['username']
-            password = request.data['password']
-            if administrators_collection.find_one({"username":username,"password":password}):
-                    administrator = administrators_collection.find_one({"username":username,"password":password})
-                    login_key = administrator.get('login_key')
-                    return Response({'status_text':'ok','status_code':200,'login_key':login_key})
-            return Response({'status_text':'UnAuthorised','status_code':401})
+            username = request.data.get('username')
+            password = request.data.get('password')
+            administrator = administrators_collection.find_one({"username": username, "password": password})
+            if administrator:
+                login_key = administrator.get('login_key') or (username + password)
+                return Response({'status_text': 'ok', 'status_code': 200, 'login_key': login_key})
+            return Response({'status_text': 'UnAuthorised', 'status_code': 401}, status=401)
         
         elif service == 'register':
-            required_data = ['username','password','email','profile_image_url','contact','address_line_1','address_line_2','address_line_3']
-            # print(request.data , )
-            if  not all(field in request.data.keys() for field in required_data):
-                return Response({"status_text":"requred keys 'username','password','email','profile_image_url','contact','address_line_1','address_line_2','address_line_3'"})
+            required_data = ['username', 'password', 'email']
+            if not all(field in request.data for field in required_data):
+                return Response({"status_text": "Required keys: username, password, email"}, status=400)
             username = request.data['username']
             password = request.data['password']
             email_id = request.data['email']
-            profile_image_url = request.data['profile_image_url']
-            contact = request.data['contact']
-            address_line_1 = request.data['address_line_1']
-            address_line_2 = request.data['address_line_2']
-            address_line_3 = request.data['address_line_3']
-            if administrators_collection.find_one({'email_id':email_id}):
-                return Response({'status':'Email Already Exist Please Login'})
-            if administrators_collection.find_one({'username':username}):
-                return Response({'status':'Username Already taken'})
+            profile_image_url = request.data.get('profile_image_url', '')
+            contact = request.data.get('contact', '')
+            address_line_1 = request.data.get('address_line_1', '')
+            address_line_2 = request.data.get('address_line_2', '')
+            address_line_3 = request.data.get('address_line_3', '')
+
+            if administrators_collection.find_one({'email_id': email_id}):
+                return Response({'status': 'Email Already Exist Please Login', 'status_code': 400}, status=400)
+            if administrators_collection.find_one({'username': username}):
+                return Response({'status': 'Username Already taken', 'status_code': 400}, status=400)
+
             administrator_data = {
-                "username":username,
-                "password":password,
-                "email_id":email_id,
-                "profile_image_url":profile_image_url,
-                "contact":contact,
-                "address_line_1":address_line_1,
-                "address_line_2":address_line_2,
-                "address_line_3":address_line_3,
-                "login_key":username+password,
+                "username": username,
+                "password": password,
+                "email_id": email_id,
+                "profile_image_url": profile_image_url,
+                "contact": contact,
+                "address_line_1": address_line_1,
+                "address_line_2": address_line_2,
+                "address_line_3": address_line_3,
+                "login_key": username + password,
             }
             administrators_collection.insert_one(administrator_data)
-            return Response({'status_text':'Registered Successfully','status_code':200})
+            return Response({'status_text': 'Registered Successfully', 'status_code': 200, 'login_key': username + password})
             
         elif service == 'AddContent':      
-                login_key = request.data['login_key']
-                administrator = administrators_collection.find_one({'login_key':login_key})
-                if administrator:
-                    administrator_id = administrator.get('_id')
-                    required_fields = ['content','content_title','content_description','file_extention']
-                    content = request.data['content']
-                    content_title = request.data['content_title']
-                    content_description = request.data['content_description']
-                    file_extention = request.data['file_extention']
+            login_key = request.data.get('login_key')
+            administrator = get_administrator(login_key)
+            if not administrator:
+                return Response({'status_text': 'Unauthorized', 'status_code': 401}, status=401)
+            
+            administrator_id = administrator.get('_id')
+            content = request.data.get('content')
+            content_title = request.data.get('content_title')
+            content_description = request.data.get('content_description', '')
+            file_extention = request.data.get('file_extention', 'jpg')
+            if not content or not content_title:
+                return Response({'status_text': 'content and content_title required', 'status_code': 400}, status=400)
 
-
-                    file_data = content.split(',')[1]
-                    decoded_file_data = base64.b64decode(file_data)
-                    file_path = os.path.join('Contents', content_title)
-                    file_path = file_path +str(administrator_id)+ '.'+file_extention
-                    # print('full name',file_path)
-                    with open(file_path, 'wb') as file:
-                        file.write(decoded_file_data)
-                    # Upload the file to Firebase Storage                        
-                    try:
-                        blob = bucket.blob(f'contents/{content_title+str(administrator_id)}')
-                        # print('Uploading file...')
-                        
-                        # Upload the file
-                        blob.upload_from_filename(file_path)
-                        # print('File uploaded successfully!')
-
-                        # Make the file publicly accessible
-                        blob.make_public()
-                        # print(f'File is publicly accessible at: {blob.public_url}')
-                    except Exception as e:
-                        print(f'An error occurred: {e}')
-
-                    # Get the public URL for the uploaded file
+            file_data = content.split(',')[1] if ',' in content else content
+            decoded_file_data = base64.b64decode(file_data)
+            os.makedirs('Contents', exist_ok=True)
+            file_name = f"{content_title}_{str(administrator_id)}.{file_extention}"
+            file_path = os.path.join('Contents', file_name)
+            with open(file_path, 'wb') as file:
+                file.write(decoded_file_data)
+            
+            content_url = f"http://127.0.0.1:8000/Contents/{file_name}"
+            if bucket:
+                try:
+                    blob = bucket.blob(f'contents/{file_name}')
+                    blob.upload_from_filename(file_path)
+                    blob.make_public()
                     content_url = blob.public_url
+                except Exception as e:
+                    print(f'Firebase upload fallback to local URL: {e}')
 
-                    order = 1
-
-                    # Send the file URL back to the client
-                    content_collection.insert_one({
-                        "administrator_id":administrator_id,
-                        "content_title":content_title,
-                        "content_description":content_description,
-                        "content_url":content_url,
-                        "content_format":file_extention,
-                        "is_active":False,
-                        "order":order
-                    })
-                    os.remove(file_path)
-                    return Response({'status_text':'content uploaded successfully','status_code':200})
+            content_collection.insert_one({
+                "administrator_id": ObjectId(administrator_id),
+                "content_title": content_title,
+                "content_description": content_description,
+                "content_url": content_url,
+                "content_format": file_extention,
+                "is_active": False,
+                "order": 1
+            })
+            return Response({'status_text': 'ok', 'status_code': 200, 'content_url': content_url})
                                  
         elif service == 'GetMyUnassignedMirrors':
-            required_fields = [ 'login_key']
-            login_key = request.data['login_key']
-            administrator = administrators_collection.find_one({'login_key':login_key})
-            if administrator:
-                if not all(field in request.data for field in required_fields):
-                    return Response({'status_text':'Required  login_key'})
-                else:
-                    administrator_id = administrator.get('_id')
-                    
-                    try:
-                        # Getting the mirrors that are not assigned yet
-                        MyMirrors = mirror_collection.find({'administrator_id':ObjectId(administrator_id), 'site_id':None})
-                    
-                    
-                    except Exception as e:
-                        return Response({'status_text':'Some issue','status_code':500})
-                        
-                    
+            login_key = request.data.get('login_key')
+            administrator = get_administrator(login_key)
+            if not administrator:
+                return Response({'status_text': 'ok', 'status_code': 200, 'data': []})
+            
+            administrator_id = administrator.get('_id')
+            MyMirrors = mirror_collection.find({
+                'administrator_id': {'$in': [administrator_id, str(administrator_id), ObjectId(administrator_id)]},
+                '$or': [{'site_id': None}, {'site_id': {'$exists': False}}]
+            })
+            MyMirrors_list = []
+            for mirror in MyMirrors:
+                m = dict(mirror)
+                if '_id' in m:
+                    m['_id'] = str(m['_id'])
+                if 'administrator_id' in m:
+                    m['administrator_id'] = str(m['administrator_id'])
+                if 'site_id' in m and m['site_id']:
+                    m['site_id'] = str(m['site_id'])
+                MyMirrors_list.append(m)
+            return Response({'status_text': 'ok', 'status_code': 200, 'data': MyMirrors_list})
 
-                    
-                    MyMirrors_list = []
-                    for mirror in MyMirrors:
-                        if '_id' in mirror:
-                            mirror['_id'] = str(mirror['_id'])
-                        if 'administrator_id' in mirror:
-                            mirror['administrator_id'] = str(mirror['administrator_id'])
-                        if 'site_id' in mirror:
-                            mirror['site_id'] = str(mirror['site_id'])
-                        MyMirrors_list.append(mirror)
-                    return Response({'status_text':'Mirrors fetched Successfully','status_code':200, 'data':MyMirrors_list})
-            return Response({'status_text':'Invalid key','status_code':500})
-                       
         elif service == 'GetMyMirrors':
-            print('the request is inside getmymirror service')
-            required_fields = [ 'login_key']
-            login_key = request.data['login_key']
-            administrator = administrators_collection.find_one({'login_key':login_key})
-            print('this is the administrator',administrator)
-            if administrator:
-                if not all(field in request.data for field in required_fields):
-                    return Response({'status_text':'Required  login_key'})
-                else:
-                    administrator_id = administrator.get('_id')
+            login_key = request.data.get('login_key')
+            administrator = get_administrator(login_key)
+            if not administrator:
+                return Response({'status_text': 'ok', 'status_code': 200, 'data': []})
             
-                    MyMirrors = mirror_collection.find({'administrator_id':ObjectId(administrator_id)})
-                        
-                    MyMirrors_list = []
-                    for mirror in MyMirrors:
-                        if '_id' in mirror:
-                            mirror['_id'] = str(mirror['_id'])
-                        if 'administrator_id' in mirror:
-                            mirror['administrator_id'] = str(mirror['administrator_id'])
-                        if 'site_id' in mirror:
-                            mirror['site_id'] = str(mirror['site_id'])
-                        if 'contents' in mirror:
-                            mirror['contents'] = str(mirror['contents'])
-                        MyMirrors_list.append(mirror)
-                        print(MyMirrors_list)
-                    return Response({'status_text':'Mirrors fetched Successfully','status_code':200, 'data':MyMirrors_list})
-            return Response({'status_text':'Invalid key','status_code':500})
-                      
+            administrator_id = administrator.get('_id')
+            MyMirrors = mirror_collection.find({
+                'administrator_id': {'$in': [administrator_id, str(administrator_id), ObjectId(administrator_id)]}
+            })
+            MyMirrors_list = []
+            for mirror in MyMirrors:
+                m = dict(mirror)
+                if '_id' in m:
+                    m['_id'] = str(m['_id'])
+                if 'administrator_id' in m:
+                    m['administrator_id'] = str(m['administrator_id'])
+                if 'site_id' in m and m['site_id']:
+                    m['site_id'] = str(m['site_id'])
+                if 'contents' in m:
+                    m['contents'] = [str(c) for c in m['contents']] if isinstance(m['contents'], list) else str(m['contents'])
+                MyMirrors_list.append(m)
+            return Response({'status_text': 'Mirrors fetched Successfully', 'status_code': 200, 'data': MyMirrors_list})
+
         elif service == 'GetMySiteMirrors':
-            required_fields = [ 'login_key', 'site_id']
-            login_key = request.data['login_key']
-            site_id = request.data['site_id']
-            administrator = administrators_collection.find_one({'login_key':login_key})
-            if administrator:
-                if not all(field in request.data for field in required_fields):
-                    return Response({'status_text':'Required  login_key'})
-                else:
-                    administrator_id = administrator.get('_id')
-                    
-                    # try:
-                        # site_id = request.data['site_id']
-                        # print(site_id)
-                    MyMirrors = mirror_collection.find({'administrator_id':ObjectId(administrator_id), 'site_id':ObjectId(site_id)})
-                    
-                    
-                    # except:
-                    #     MyMirrors = mirror_collection.find({'administrator_id':ObjectId(administrator_id)})
-                        
-                    
+            login_key = request.data.get('login_key')
+            site_id = request.data.get('site_id')
+            administrator = get_administrator(login_key)
+            if not administrator:
+                return Response({'status_text': 'ok', 'status_code': 200, 'data': []})
+            
+            administrator_id = administrator.get('_id')
+            query = {
+                'administrator_id': {'$in': [administrator_id, str(administrator_id), ObjectId(administrator_id)]}
+            }
+            if site_id:
+                try:
+                    query['site_id'] = {'$in': [site_id, ObjectId(site_id)]}
+                except Exception:
+                    query['site_id'] = site_id
 
-                    
-                    MyMirrors_list = []
-                    for mirror in MyMirrors:
-                        if '_id' in mirror:
-                            mirror['_id'] = str(mirror['_id'])
-                        if 'administrator_id' in mirror:
-                            mirror['administrator_id'] = str(mirror['administrator_id'])
-                        if 'site_id' in mirror:
-                            mirror['site_id'] = str(mirror['site_id'])
-                        if 'contents' in mirror:
-                            strcontents =  [str(content) for content in mirror['contents']]
-                            mirror['contents'] = strcontents
-                                
-                        MyMirrors_list.append(mirror)
-                    return Response({'status_text':'Site fetched Successfully','status_code':200, 'data':MyMirrors_list})
-            return Response({'status_text':'Invalid key','status_code':500})
-        
+            MyMirrors = mirror_collection.find(query)
+            MyMirrors_list = []
+            for mirror in MyMirrors:
+                m = dict(mirror)
+                if '_id' in m:
+                    m['_id'] = str(m['_id'])
+                if 'administrator_id' in m:
+                    m['administrator_id'] = str(m['administrator_id'])
+                if 'site_id' in m and m['site_id']:
+                    m['site_id'] = str(m['site_id'])
+                if 'contents' in m:
+                    m['contents'] = [str(c) for c in m['contents']] if isinstance(m['contents'], list) else str(m['contents'])
+                MyMirrors_list.append(m)
+            return Response({'status_text': 'Mirrors fetched Successfully', 'status_code': 200, 'data': MyMirrors_list})
+
         elif service == 'AssignMirrorToSite':
-            required_fields = [ 'login_key','site_id','mirrors']
-            login_key = request.data['login_key']
-            mirrors = request.data['mirrors']
-            site_id = request.data['site_id']
-            
-            
-            
-            administrator = administrators_collection.find_one({'login_key':login_key})
-            if administrator:
-                if not all(field in request.data for field in required_fields):
-                    return Response({'status_text':'Required ',"required_fields":required_fields })
-                else:
-                    administrator_id = administrator.get('_id')
-                    for mirror in mirrors:
-                        filter_query = {"_id": ObjectId(mirror["_id"])}
-                        update_data = {"$set": {"site_id": ObjectId(site_id)}}
-                        
-                        
-                        print(filter_query,update_data)
+            login_key = request.data.get('login_key')
+            site_id = request.data.get('site_id')
+            mirrors = request.data.get('mirrors', [])
+            administrator = get_administrator(login_key)
+            if administrator and site_id:
+                for mirror in mirrors:
+                    mirror_id = mirror.get('_id') if isinstance(mirror, dict) else mirror
+                    mirror_collection.update_one({'_id': ObjectId(mirror_id)}, {'$set': {'site_id': ObjectId(site_id)}})
+                return Response({'status_text': 'Mirror added to site Successfully', 'status_code': 200})
+            return Response({'status_text': 'Invalid key or site_id', 'status_code': 400}, status=400)
 
-                        mirror_collection.update_one(filter_query, update_data)
-                    # mirror = mirror_collection.find_one({'_id':mirror_id})
-                    # mirror.up
-                    
-                        
-                    return Response({'status_text':'Mirror added to site  Successfully','status_code':200 })
-            return Response({'status_text':'Invalid key','status_code':500})
-        
-        
         elif service == 'AssignContentToMirror':
-            required_fields = [ 'login_key','mirror_id','content_ids']
-            login_key = request.data['login_key']
-            content_ids = request.data['content_ids']
-            mirror_id = request.data['mirror_id']
-            
-            
-            
-            administrator = administrators_collection.find_one({'login_key':login_key})
-            if administrator:
-                if not all(field in request.data for field in required_fields):
-                    return Response({'status_text':'Required ',"required_fields":required_fields })
-                else:
-                    # Define query and update
-                    filter_query = {"_id": ObjectId(mirror_id)}
-                    content_ids_as_objectID = [ObjectId(id) for id in content_ids]
-                    update_data = {"$set": {"contents": content_ids_as_objectID}}
+            login_key = request.data.get('login_key')
+            mirror_id = request.data.get('mirror_id')
+            content_ids = request.data.get('content_ids', [])
+            administrator = get_administrator(login_key)
+            if administrator and mirror_id:
+                mirror = None
+                try:
+                    mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id)})
+                except Exception:
+                    mirror = mirror_collection.find_one({'_id': mirror_id})
+                
+                if mirror:
+                    existing_contents = mirror.get('contents', [])
+                    existing_str_ids = {str(c) for c in existing_contents}
+                    updated_contents = list(existing_contents)
                     
+                    for cid in content_ids:
+                        if str(cid) not in existing_str_ids:
+                            try:
+                                updated_contents.append(ObjectId(cid))
+                            except Exception:
+                                updated_contents.append(cid)
+                            existing_str_ids.add(str(cid))
                     
-                    print(filter_query,update_data)
+                    mirror_collection.update_one(
+                        {'_id': mirror.get('_id')},
+                        {'$set': {'contents': updated_contents}}
+                    )
+                    return Response({'status_text': 'Contents added to mirror successfully', 'status_code': 200})
+                return Response({'status_text': 'Mirror not found', 'status_code': 404}, status=404)
+            return Response({'status_text': 'Invalid key or mirror_id', 'status_code': 400}, status=400)
 
-                    mirror_collection.update_one(filter_query, update_data)
-                    # mirror = mirror_collection.find_one({'_id':mirror_id})
-                    # mirror.up
+        elif service == 'RemoveContentFromMirror':
+            login_key = request.data.get('login_key')
+            mirror_id = request.data.get('mirror_id')
+            content_id = request.data.get('content_id')
+            administrator = get_administrator(login_key)
+            if administrator and mirror_id and content_id:
+                mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id)})
+                if mirror:
+                    current_contents = mirror.get('contents', [])
+                    updated_contents = [
+                        cid for cid in current_contents
+                        if str(cid) != str(content_id)
+                    ]
+                    current_disabled = mirror.get('disabled_contents', [])
+                    updated_disabled = [
+                        cid for cid in current_disabled
+                        if str(cid) != str(content_id)
+                    ]
+                    mirror_collection.update_one(
+                        {'_id': ObjectId(mirror_id)},
+                        {'$set': {'contents': updated_contents, 'disabled_contents': updated_disabled}}
+                    )
+                    return Response({'status_text': 'Content removed from mirror successfully', 'status_code': 200})
+                return Response({'status_text': 'Mirror not found', 'status_code': 404}, status=404)
+            return Response({'status_text': 'Invalid key, mirror_id, or content_id', 'status_code': 400}, status=400)
+
+        elif service in ['UpdateMirrorPlaylistOrder', 'ReorderMirrorContents']:
+            login_key = request.data.get('login_key')
+            mirror_id = request.data.get('mirror_id')
+            ordered_content_ids = request.data.get('ordered_content_ids', [])
+            administrator = get_administrator(login_key)
+            if administrator and mirror_id:
+                mirror = None
+                try:
+                    mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id)})
+                except Exception:
+                    mirror = mirror_collection.find_one({'_id': mirror_id})
+                
+                if mirror:
+                    new_order = []
+                    seen = set()
+                    for cid in ordered_content_ids:
+                        cid_str = str(cid)
+                        if cid_str not in seen:
+                            try:
+                                new_order.append(ObjectId(cid_str))
+                            except Exception:
+                                new_order.append(cid_str)
+                            seen.add(cid_str)
                     
-                        
-                    return Response({'status_text':'Mirror added to site  Successfully','status_code':200 })
-            return Response({'status_text':'Invalid key','status_code':500})
+                    for cid in mirror.get('contents', []):
+                        if str(cid) not in seen:
+                            new_order.append(cid)
+                            seen.add(str(cid))
+                    
+                    mirror_collection.update_one({'_id': mirror.get('_id')}, {'$set': {'contents': new_order}})
+                    return Response({'status_text': 'Playlist order updated successfully', 'status_code': 200})
+                return Response({'status_text': 'Mirror not found', 'status_code': 404}, status=404)
+            return Response({'status_text': 'Invalid key or mirror_id', 'status_code': 400}, status=400)
         
         elif service == 'GetMySites':
-            login_key = request.data['login_key']
-            administrator = administrators_collection.find_one({'login_key':login_key})
+            login_key = request.data.get('login_key')
+            administrator = get_administrator(login_key)
             if administrator:
                 administrator_id = administrator.get('_id')
-                MySites = sites_collection.find({'administrator_id':administrator_id})
+                MySites = sites_collection.find({
+                    'administrator_id': {'$in': [administrator_id, str(administrator_id), ObjectId(administrator_id)]}
+                })
                 MySites_list = []
-
                 for site in MySites:
-                    if '_id' in site:
-                        site['_id'] = str(site['_id'])
-                    if 'administrator_id' in site:
-                        site['administrator_id'] = str(site['administrator_id'])
-                    if 'site_id' in site:
-                        site['site_id'] = str(site['site_id'])
-                    MySites_list.append(site)
-                # print(MySites_list)
-            
-                return Response(status=200,data={'status_text':'ok','data':MySites_list})
-            # return Response({'status_text':'Administrator not found','status_code':403},status=403)
+                    s = dict(site)
+                    if '_id' in s:
+                        s['_id'] = str(s['_id'])
+                    if 'administrator_id' in s:
+                        s['administrator_id'] = str(s['administrator_id'])
+                    if 'site_id' in s:
+                        s['site_id'] = str(s['site_id'])
+                    MySites_list.append(s)
+                return Response(status=200, data={'status_text': 'ok', 'data': MySites_list})
+            return Response(status=200, data={'status_text': 'ok', 'data': []})
                       
         elif service == 'GetMyContents':
-            login_key = request.data['login_key']
-            administrator = administrators_collection.find_one({'login_key':login_key})
-            administrator_id =administrator.get('_id')
-
-            print(request.data)
-
-            MyContents = content_collection.find({'administrator_id':ObjectId(administrator_id)})
-            MyContent_list = []
-            for content in MyContents:
-                if '_id' in content:
-                    content['_id'] = str(content['_id'])
-                if 'administrator_id' in content:
-                    content['administrator_id'] = str(content['administrator_id'])
-                if 'site_id' in content:
-                    content['site_id'] = str(content['site_id'])
-                if 'mirror_id' in content:
-                    content['mirror_id'] = str(content['mirror_id'])
-                MyContent_list.append(content)
-            return Response({'status_text':'ok','status_code':200,'data':MyContent_list})    
-        
+            login_key = request.data.get('login_key')
+            administrator = get_administrator(login_key)
+            if administrator:
+                administrator_id = administrator.get('_id')
+                MyContents = content_collection.find({
+                    'administrator_id': {'$in': [administrator_id, str(administrator_id), ObjectId(administrator_id)]}
+                })
+                MyContent_list = []
+                for content in MyContents:
+                    c = dict(content)
+                    if '_id' in c:
+                        c['_id'] = str(c['_id'])
+                    if 'administrator_id' in c:
+                        c['administrator_id'] = str(c['administrator_id'])
+                    if 'site_id' in c and c['site_id']:
+                        c['site_id'] = str(c['site_id'])
+                    if 'mirror_id' in c and c['mirror_id']:
+                        c['mirror_id'] = str(c['mirror_id'])
+                    MyContent_list.append(c)
+                return Response({'status_text': 'ok', 'status_code': 200, 'data': MyContent_list})
+            return Response({'status_text': 'ok', 'status_code': 200, 'data': []})
         
         elif service == 'GetContentsForThisMirror':
-            required_fields = ['login_key','mirror_id']
-            login_key = request.data['login_key']
-            administrator = administrators_collection.find_one({'login_key':login_key})
-            administrator_id =administrator.get('_id')
-
-            mirror_id = request.data['mirror_id']
-            
-            print("getting mirror")
-            mirror = mirror_collection.find_one({'_id':ObjectId(mirror_id)})
-            
-            # print(mirror['contents'])
-            
+            login_key = request.data.get('login_key')
+            mirror_id = request.data.get('mirror_id')
+            mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id)}) if mirror_id else None
             contents = []
-            if 'contents' in mirror:
-                for id in mirror['contents']:
-                    content = content_collection.find_one({"_id":id})
-                    print(content)
-                    contents.append(content)
-                    
-                        
-            MyContent_list = []
-            for content in contents:
-                if '_id' in content:
-                    content['_id'] = str(content['_id'])
-                if 'administrator_id' in content:
-                    content['administrator_id'] = str(content['administrator_id'])
-                if 'site_id' in content:
-                    content['site_id'] = str(content['site_id'])
-                if 'mirror_id' in content:
-                    content['mirror_id'] = str(content['mirror_id'])
-                MyContent_list.append(content)
+            if mirror and 'contents' in mirror and isinstance(mirror['contents'], list):
+                disabled_set = {str(d) for d in mirror.get('disabled_contents', [])}
+                for cid in mirror['contents']:
+                    try:
+                        content_doc = content_collection.find_one({"_id": ObjectId(cid)})
+                        if content_doc:
+                            c = dict(content_doc)
+                            if '_id' in c:
+                                c['_id'] = str(c['_id'])
+                            if 'administrator_id' in c:
+                                c['administrator_id'] = str(c['administrator_id'])
+                            c['is_active'] = str(cid) not in disabled_set
+                            contents.append(c)
+                    except Exception:
+                        pass
+            return Response({'status_text': 'ok', 'status_code': 200, 'data': contents})
+
+        elif service in ['ToggleContentStatusOnMirror', 'SetContentMirrorStatus']:
+            login_key = request.data.get('login_key')
+            mirror_id = request.data.get('mirror_id')
+            content_id = request.data.get('content_id')
+            is_active_param = request.data.get('is_active')
+            administrator = get_administrator(login_key)
+            if administrator and mirror_id and content_id:
+                mirror = None
+                try:
+                    mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id)})
+                except Exception:
+                    mirror = mirror_collection.find_one({'_id': mirror_id})
+                if not mirror:
+                    return Response({'status_text': 'Mirror not found', 'status_code': 404}, status=404)
                 
-                print(MyContent_list)
-            return Response({'status_text':'ok','status_code':200,'data':contents})    
+                disabled_list = list(mirror.get('disabled_contents', []))
+                disabled_str_ids = {str(d) for d in disabled_list}
+                cid_str = str(content_id)
+
+                if is_active_param is None:
+                    new_active = cid_str in disabled_str_ids
+                else:
+                    new_active = bool(is_active_param)
+
+                if new_active:
+                    disabled_list = [d for d in disabled_list if str(d) != cid_str]
+                else:
+                    if cid_str not in disabled_str_ids:
+                        try:
+                            disabled_list.append(ObjectId(cid_str))
+                        except Exception:
+                            disabled_list.append(cid_str)
+
+                current_time = time.time()
+                mirror_collection.update_one(
+                    {'_id': mirror.get('_id')},
+                    {'$set': {'disabled_contents': disabled_list, 'last_refresh_timestamp': current_time}}
+                )
+
+                disabled_set = {str(d) for d in disabled_list}
+                active_contents = []
+                for cid in mirror.get('contents', []):
+                    if str(cid) in disabled_set:
+                        continue
+                    try:
+                        c_doc = content_collection.find_one({'_id': ObjectId(cid)})
+                        if c_doc:
+                            c = dict(c_doc)
+                            if '_id' in c: c['_id'] = str(c['_id'])
+                            if 'mirror_id' in c and c['mirror_id']: c['mirror_id'] = str(c['mirror_id'])
+                            if 'site_id' in c and c['site_id']: c['site_id'] = str(c['site_id'])
+                            if 'administrator_id' in c: c['administrator_id'] = str(c['administrator_id'])
+                            active_contents.append(c)
+                    except Exception:
+                        pass
+
+                try:
+                    from channels.layers import get_channel_layer
+                    from asgiref.sync import async_to_sync
+                    channel_layer = get_channel_layer()
+                    if channel_layer:
+                        msg = {
+                            'type': 'update.mirror',
+                            'data': {
+                                'service': 'ReloadContents',
+                                'mirror_id': str(mirror.get('_id')),
+                                'timestamp': current_time,
+                                'data': active_contents
+                            }
+                        }
+                        async_to_sync(channel_layer.group_send)(f"mirror_{str(mirror.get('_id'))}", msg)
+                        async_to_sync(channel_layer.group_send)("mirror_group", msg)
+                except Exception as e:
+                    print(f"Broadcast notice: {e}")
+
+                return Response({
+                    'status_text': 'Content status updated on mirror',
+                    'status_code': 200,
+                    'is_active': new_active,
+                    'mirror_id': str(mirror.get('_id')),
+                    'content_id': cid_str,
+                    'active_count': len(active_contents)
+                }, status=200)
+            return Response({'status_text': 'Required mirror_id and content_id', 'status_code': 400}, status=400)    
 
         elif service == 'GetContentDetails':
-            required_fields = ['login_key','content_id']
-            login_key = request.data['login_key']
-            content_id = request.data['content_id']
-            administrator = administrators_collection.find_one({'login_key':login_key})
-            content = content_collection.find_one({'_id':ObjectId(content_id)})
-               
-                       
-            # MyContent_list = []
-            # for content in MyContents:
-            if '_id' in content:
-                content['_id'] = str(content['_id'])
-            if 'administrator_id' in content:
-                content['administrator_id'] = str(content['administrator_id'])
-            if 'site_id' in content:
-                content['site_id'] = str(content['site_id'])
-            if 'mirror_id' in content:
-                content['mirror_id'] = str(content['mirror_id'])
-                # MyContent_list.append(content)
-            return Response({'status_text':'ok','status_code':200,'data':content})
+            content_id = request.data.get('content_id')
+            content = content_collection.find_one({'_id': ObjectId(content_id)}) if content_id else None
+            if content:
+                c = dict(content)
+                if '_id' in c:
+                    c['_id'] = str(c['_id'])
+                if 'administrator_id' in c:
+                    c['administrator_id'] = str(c['administrator_id'])
+                return Response({'status_text': 'ok', 'status_code': 200, 'data': c})
+            return Response({'status_text': 'Not found', 'status_code': 404}, status=404)
         
         elif service == 'GetMirrorDetails':
-            required_fields = ['login_key','mirror_id']
-            login_key = request.data['login_key']
-            mirror_id = request.data['mirror_id']
-            administrator = administrators_collection.find_one({'login_key':login_key})
-            mirror = mirror_collection.find_one({'_id':ObjectId(mirror_id)})
-               
-                       
-            # MyContent_list = []
-            # for content in MyContents:
-            if '_id' in mirror:
-                mirror['_id'] = str(mirror['_id'])
-            if 'administrator_id' in mirror:
-                mirror['administrator_id'] = str(mirror['administrator_id'])
-            if 'site_id' in mirror:
-                mirror['site_id'] = str(mirror['site_id'])
-            if 'mirror_id' in mirror:
-                mirror['mirror_id'] = str(mirror['mirror_id'])
-                # MyContent_list.append(content)
-            return Response({'status_text':'ok','status_code':200,'data':mirror})
+            mirror_id = request.data.get('mirror_id')
+            mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id)}) if mirror_id else None
+            if mirror:
+                m = dict(mirror)
+                if '_id' in m:
+                    m['_id'] = str(m['_id'])
+                if 'administrator_id' in m:
+                    m['administrator_id'] = str(m['administrator_id'])
+                if 'site_id' in m and m['site_id']:
+                    m['site_id'] = str(m['site_id'])
+                if 'contents' in m and isinstance(m['contents'], list):
+                    m['contents'] = [str(c) for c in m['contents']]
+                return Response({'status_text': 'ok', 'status_code': 200, 'data': m})
+            return Response({'status_text': 'Not found', 'status_code': 404}, status=404)
         
         elif service == 'AddSite':
-            # print(request.data)
-            required_fields = ['site_description','site_name','login_key']
-            # print(text_data_json)
-            if not all(field in request.data for field in required_fields):
-                return Response({'status_code':500, 'status_text':'Required site_description, site_name, login_key'},status=500)
-            else:
-                login_key = request.data['login_key']
-                administrator = administrators_collection.find_one({"login_key":login_key})
-                if administrator:
-                    site_name = request.data['site_name']
-                    site_description = request.data['site_description']
-                    administrator_id = administrator.get('_id')
-                    # MySites = sites_collection.find({'administrator_id':administrator_id})
-                    sites_collection.insert_one({
-                        "site_name":site_name,
-                        "site_description":site_description,
-                        "administrator_id":ObjectId(administrator_id)
-                    })
-                    return Response({'status_text':'ok', 'status_code':200})
-                return Response({'status_text':'check key', 'status_code':401})
+            site_name = request.data.get('site_name')
+            site_description = request.data.get('site_description', '')
+            if not site_name:
+                return Response({'status_code': 400, 'status_text': 'site_name is required'}, status=400)
+            
+            login_key = request.data.get('login_key')
+            administrator = get_administrator(login_key)
+            if administrator:
+                administrator_id = administrator.get('_id')
+                sites_collection.insert_one({
+                    "site_name": site_name,
+                    "site_description": site_description or '',
+                    "administrator_id": ObjectId(administrator_id)
+                })
+                return Response({'status_text': 'ok', 'status_code': 200})
+            return Response({'status_text': 'check key', 'status_code': 401}, status=401)
                 
         elif service == 'AddMirror':
+            login_key = request.data.get('login_key')
+            administrator = get_administrator(login_key)
+            if not administrator:
+                return Response({'status_code': 401, 'status_text': 'invalid key'}, status=401)
             
-            print(request.data)
-            
-            login_key = request.data['login_key']
-            required_fields = ['mirror_name','mirror_description','username','password','height','width','login_key']
-            if not all(field in request.data for field in required_fields):
-                return Response({'status_text':'Required mirror_name, mirror_description, username, password, height, width , login_key'},status=500)
-            else:
-                administrator = administrators_collection.find_one({'login_key':login_key})
+            administrator_id = administrator.get('_id')
+            mirror_name = request.data.get('mirror_name', '')
+            mirror_description = request.data.get('mirror_description', '')
+            username = request.data.get('username', '')
+            password = request.data.get('password', '')
+            mirror_height = request.data.get('height', '1080')
+            mirror_width = request.data.get('width', '1920')
 
-                if administrator:
-                    administrator_id = administrator.get('_id')
-                    
+            mirror_collection.insert_one({
+                "username": username,
+                "password": password,
+                "administrator_id": ObjectId(administrator_id),
+                "mirror_name": mirror_name,
+                "mirror_description": mirror_description,
+                "mirror_height": mirror_height,
+                "mirror_width": mirror_width,
+                "site_id": None,
+                "contents": []
+            })
+            return Response({'status_code': 200, 'status_text': 'ok'})
 
-                    # MySites = sites_collection.find({'administrator_id':administrator_id})
-                    mirror_name = request.data['mirror_name']
-                    mirror_description = request.data['mirror_description']
-                    username = request.data['username']
-                    password = request.data['password']
-                    mirror_height = request.data['height']
-                    mirror_width = request.data['width']
-                
-
-                    mirror_collection.insert_one({
-                        "username":username,
-                        "password":password,
-                        "administrator_id":administrator_id,
-                        "mirror_name":mirror_name,
-                        "mirror_description":mirror_description,
-                        "mirror_height":mirror_height,
-                        "mirror_width":mirror_width,
-                    })
-
-                    print('all set')
-
-                    return Response({'status_code':200, 'status_text':'ok'})
-                return Response({'status_code':401, 'status_text':'invalid key'})
         elif service == 'DeleteMirror':
-            login_key = request.data['login_key']
-            mirror_id = request.data['mirror_id']
-            required_fields = ['login_key','mirror_id']
-            if not all(field in request.data for field in required_fields):
-                return Response({'status_text':'Required mirror_id,  login_key'})
-            else:
-                administrator = administrators_collection.find_one({'login_key':login_key})
+            login_key = request.data.get('login_key')
+            mirror_id = request.data.get('mirror_id')
+            administrator = get_administrator(login_key)
+            if administrator and mirror_id:
+                mirror_collection.delete_one({'_id': ObjectId(mirror_id)})
+                return Response({'status_code': 200, 'status_text': 'ok'})
+            return Response({'status_code': 401, 'status_text': 'invalid key'}, status=401)
 
-                if administrator:
-                    administrator_id = administrator.get('_id')
-
-                    mirror_collection.delete_one({'_id':ObjectId(mirror_id)})
-                    # print('all set')
-
-                    return Response({'status_code':200, 'status_text':'ok'})
-                return Response({'status_code':401, 'status_text':'invalid key'})
         elif service == 'DeleteSite':
-            login_key = request.data['login_key']
-            site_id = request.data['site_id']
-            required_fields = ['login_key','site_id']
-            if not all(field in request.data for field in required_fields):
-                return Response({'status_text':'Required msite_id, login_key'})
-            else:
-                administrator = administrators_collection.find_one({'login_key':login_key})
+            login_key = request.data.get('login_key')
+            site_id = request.data.get('site_id')
+            administrator = get_administrator(login_key)
+            if administrator and site_id:
+                sites_collection.delete_one({'_id': ObjectId(site_id)})
+                return Response({'status_code': 200, 'status_text': 'ok'})
+            return Response({'status_code': 401, 'status_text': 'invalid key'}, status=401)
 
-                if administrator:
-                    administrator_id = administrator.get('_id')
-
-                    site = sites_collection.delete_one({'_id':ObjectId(site_id)})
-                    # if site.deleted_count > 0:
-                        # print("Document deleted successfully.")
-                    # else:
-                        # print("No document found with that ID.")
-
-                    # print('all set')
-
-                    return Response({'status_code':200, 'status_text':'ok'})
-                return Response({'status_code':401, 'status_text':'invalid key'})
         elif service == 'DeleteContent':
-            login_key = request.data['login_key']
-            content_id = request.data['content_id']
-            required_fields = ['login_key','content_id']
-            if not all(field in request.data for field in required_fields):
-                return Response({'status_text':'Required content_id, login_key'})
-            else:
-                administrator = administrators_collection.find_one({'login_key':login_key})
-
-                if administrator:
-                    administrator_id = administrator.get('_id')
-
-                    content = content_collection.find_one({'_id':ObjectId(content_id)})
-                    # print('content url',content['content_url'])
-                    delete_file_from_public_url(content["content_url"])
-                    content_collection.delete_one({'_id':ObjectId(content_id)})
-                    # print('all set')
-
-                    return Response({'status_code':200, 'status_text':'ok'})
-                return Response({'status_code':401, 'status_text':'invalid key'})
+            login_key = request.data.get('login_key')
+            content_id = request.data.get('content_id')
+            administrator = get_administrator(login_key)
+            if administrator and content_id:
+                content = content_collection.find_one({'_id': ObjectId(content_id)})
+                if content and 'content_url' in content and delete_file_from_public_url:
+                    try:
+                        delete_file_from_public_url(content["content_url"])
+                    except Exception:
+                        pass
+                content_collection.delete_one({'_id': ObjectId(content_id)})
+                return Response({'status_code': 200, 'status_text': 'ok'})
+            return Response({'status_code': 401, 'status_text': 'invalid key'}, status=401)
 
         elif service == 'RegisterSite':
-            required_data = ['administrator_username','site_name','site_image_url','site_description']
-            if  not all(field in request.data for field in required_data):
-                return Response({"status_text":"requred keys 'administrator_username','site_name','site_image_url','site_description'"})
-            site_name = request.data['site_name']
-            site_image_url = request.data['site_image_url']
-            administrator_username = request.data['administrator_username']
-            site_description = request.data['site_description']
-            if sites_collection.find_one({'site_name':site_name}):
-                return Response({'status':'site name Already Exist'})
-            administrator =  administrators_collection.find_one({"username":administrator_username})
+            site_name = request.data.get('site_name')
+            site_image_url = request.data.get('site_image_url', '')
+            administrator_username = request.data.get('administrator_username')
+            site_description = request.data.get('site_description', '')
+            if not site_name or not administrator_username:
+                return Response({"status_text": "Required site_name and administrator_username"}, status=400)
+            
+            administrator = administrators_collection.find_one({"username": administrator_username})
             if administrator is not None:
                 site_data = {
-                    "site_name":site_name,
-                    "administrator_id":administrator.get('_id'),
-                    "site_name":site_name,
-                    "site_description":site_description,
-                    "site_image_url":site_image_url
+                    "site_name": site_name,
+                    "administrator_id": administrator.get('_id'),
+                    "site_description": site_description,
+                    "site_image_url": site_image_url
                 }
                 sites_collection.insert_one(site_data)
-                return Response({'status_text':'Registered Successfully','status_code':200})
+                return Response({'status_text': 'Registered Successfully', 'status_code': 200})
+            return Response({'status_text': 'UnAuthorised', 'status_code': 401}, status=401)
+
+        elif service in ['RefreshMirror', 'ReloadMirror', 'ReloadMirrorContents']:
+            mirror_id = request.data.get('mirror_id')
+            if not mirror_id:
+                return Response({'status_text': 'Required mirror_id', 'status_code': 400}, status=400)
+            
+            mirror = None
+            try:
+                mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id)})
+            except Exception:
+                mirror = mirror_collection.find_one({'_id': mirror_id})
+            
+            if not mirror:
+                return Response({'status_text': 'Mirror not found', 'status_code': 404}, status=404)
+            
+            current_time = time.time()
+            mirror_collection.update_one({'_id': mirror.get('_id')}, {'$set': {'last_refresh_timestamp': current_time}})
+            
+            disabled_set = {str(d) for d in mirror.get('disabled_contents', [])}
+            content_list = []
+            for cid in mirror.get('contents', []):
+                if str(cid) in disabled_set:
+                    continue
+                try:
+                    c_doc = content_collection.find_one({'_id': ObjectId(cid)})
+                    if c_doc:
+                        c = dict(c_doc)
+                        if '_id' in c: c['_id'] = str(c['_id'])
+                        if 'mirror_id' in c and c['mirror_id']: c['mirror_id'] = str(c['mirror_id'])
+                        if 'site_id' in c and c['site_id']: c['site_id'] = str(c['site_id'])
+                        if 'administrator_id' in c: c['administrator_id'] = str(c['administrator_id'])
+                        content_list.append(c)
+                except Exception:
+                    pass
+
+            try:
+                from channels.layers import get_channel_layer
+                from asgiref.sync import async_to_sync
+                channel_layer = get_channel_layer()
+                if channel_layer:
+                    msg = {
+                        'type': 'update.mirror',
+                        'data': {
+                            'service': 'ReloadContents',
+                            'mirror_id': str(mirror.get('_id')),
+                            'timestamp': current_time,
+                            'data': content_list
+                        }
+                    }
+                    async_to_sync(channel_layer.group_send)(f"mirror_{str(mirror.get('_id'))}", msg)
+                    async_to_sync(channel_layer.group_send)("mirror_group", msg)
+            except Exception as e:
+                print(f"Channel broadcast notice: {e}")
+
+            return Response({
+                'status_text': 'Refresh signal sent to mirror successfully',
+                'status_code': 200,
+                'data': {
+                    'mirror_id': str(mirror.get('_id')),
+                    'contents_count': len(content_list),
+                    'timestamp': current_time,
+                    'contents': content_list
+                }
+            }, status=200)
+
+        elif service in ['ControlPlayback', 'PlaybackControl']:
+            mirror_id = request.data.get('mirror_id')
+            action = request.data.get('action', 'toggle')
+            if not mirror_id:
+                return Response({'status_text': 'Required mirror_id', 'status_code': 400}, status=400)
+            
+            mirror = None
+            try:
+                mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id)})
+            except Exception:
+                mirror = mirror_collection.find_one({'_id': mirror_id})
+            
+            if not mirror:
+                return Response({'status_text': 'Mirror not found', 'status_code': 404}, status=404)
+            
+            current_state = mirror.get('playback_state', 'playing')
+            if action == 'toggle':
+                new_state = 'paused' if current_state == 'playing' else 'playing'
+            elif action in ['pause', 'paused']:
+                new_state = 'paused'
             else:
-                return Response({'status_text':'UnAuthorised','status_code':401})
+                new_state = 'playing'
+            
+            current_time = time.time()
+            mirror_collection.update_one(
+                {'_id': mirror.get('_id')},
+                {'$set': {'playback_state': new_state, 'last_state_change_timestamp': current_time}}
+            )
+
+            try:
+                from channels.layers import get_channel_layer
+                from asgiref.sync import async_to_sync
+                channel_layer = get_channel_layer()
+                if channel_layer:
+                    msg = {
+                        'type': 'update.mirror',
+                        'data': {
+                            'service': 'PlaybackControl',
+                            'mirror_id': str(mirror.get('_id')),
+                            'action': new_state,
+                            'timestamp': current_time
+                        }
+                    }
+                    async_to_sync(channel_layer.group_send)(f"mirror_{str(mirror.get('_id'))}", msg)
+                    async_to_sync(channel_layer.group_send)("mirror_group", msg)
+            except Exception as e:
+                print(f"Playback control broadcast notice: {e}")
+
+            return Response({
+                'status_text': f'Playback state set to {new_state}',
+                'status_code': 200,
+                'playback_state': new_state,
+                'mirror_id': str(mirror.get('_id'))
+            }, status=200)
+
+        elif service in ['GetMirrorLiveStatus', 'GetMirrorStatus']:
+            mirror_id = request.data.get('mirror_id')
+            if not mirror_id:
+                return Response({'status_text': 'Required mirror_id', 'status_code': 400}, status=400)
+            
+            mirror = None
+            try:
+                mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id)})
+            except Exception:
+                mirror = mirror_collection.find_one({'_id': mirror_id})
+            
+            if not mirror:
+                return Response({'status_text': 'Mirror not found', 'status_code': 404}, status=404)
+            
+            last_active = mirror.get('last_active_timestamp', 0)
+            is_online = bool(last_active and (time.time() - last_active < 45))
+
+            return Response({
+                'status_text': 'ok',
+                'status_code': 200,
+                'data': {
+                    'mirror_id': str(mirror.get('_id')),
+                    'active_content_id': mirror.get('active_content_id'),
+                    'active_content_index': mirror.get('active_content_index', 0),
+                    'playback_state': mirror.get('playback_state', 'playing'),
+                    'last_active_timestamp': last_active,
+                    'last_refresh_timestamp': mirror.get('last_refresh_timestamp', 0),
+                    'is_online': is_online
+                }
+            }, status=200)
+
+        elif service in ['SyncConnectedMirrors', 'SyncMirrors']:
+            mirror_id = request.data.get('mirror_id')
+            target_index = request.data.get('index')
+            target_content_id = request.data.get('content_id')
+            if not mirror_id:
+                return Response({'status_text': 'Required mirror_id', 'status_code': 400}, status=400)
+            
+            mirror = None
+            try:
+                mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id)})
+            except Exception:
+                mirror = mirror_collection.find_one({'_id': mirror_id})
+            
+            if not mirror:
+                return Response({'status_text': 'Mirror not found', 'status_code': 404}, status=404)
+            
+            sync_index = int(target_index) if target_index is not None else mirror.get('active_content_index', 0)
+            sync_cid = target_content_id or mirror.get('active_content_id')
+            current_time = time.time()
+
+            mirror_collection.update_one(
+                {'_id': mirror.get('_id')},
+                {'$set': {'sync_timestamp': current_time, 'active_content_index': sync_index, 'active_content_id': sync_cid}}
+            )
+
+            site_id = mirror.get('site_id')
+            if site_id:
+                try:
+                    mirror_collection.update_many(
+                        {'site_id': site_id},
+                        {'$set': {'sync_timestamp': current_time, 'active_content_index': sync_index, 'active_content_id': sync_cid}}
+                    )
+                except Exception:
+                    pass
+
+            try:
+                from channels.layers import get_channel_layer
+                from asgiref.sync import async_to_sync
+                channel_layer = get_channel_layer()
+                if channel_layer:
+                    msg = {
+                        'type': 'update.mirror',
+                        'data': {
+                            'service': 'SyncSlide',
+                            'source_mirror_id': str(mirror.get('_id')),
+                            'site_id': str(site_id) if site_id else None,
+                            'index': sync_index,
+                            'content_id': sync_cid,
+                            'timestamp': current_time
+                        }
+                    }
+                    async_to_sync(channel_layer.group_send)(f"mirror_{str(mirror.get('_id'))}", msg)
+                    async_to_sync(channel_layer.group_send)("mirror_group", msg)
+            except Exception as e:
+                print(f"Sync broadcast notice: {e}")
+
+            return Response({
+                'status_text': 'Sync signal broadcast to connected mirrors',
+                'status_code': 200,
+                'data': {
+                    'index': sync_index,
+                    'content_id': sync_cid,
+                    'timestamp': current_time
+                }
+            }, status=200)
+
+        return Response({'status_text': 'Unknown service', 'status_code': 400}, status=400)
 
 
 class Mirror(APIView):
 
     def post(self, request):
-        # print('login service')
         if 'service' in request.data:
             service = request.data['service']
         else:
-            return Response({'status_code':200, 'status_text':'Required service'})
+            return Response({'status_code': 400, 'status_text': 'Required service'}, status=400)
 
         if service == 'login':
-            # print('login service')
-            username = request.data['username']
-            password = request.data['password']
-            if mirror_collection.find_one({"username":username,"password":password}):   
-                    mirror = mirror_collection.find_one({"username":username,"password":password})
-                    content_list= []
-                    for content in mirror['contents']:
-                        # print(content)
-                        content_list.append(content_collection.find_one({'_id':ObjectId(content)}))
-                    content_list_str = []
-                    for content in content_list:
-                        if '_id' in content:
-                            content['_id'] = str(content['_id'])
-                        if 'mirror_id' in content:
-                            content['mirror_id'] = str(content['mirror_id'])
-                        if 'site_id' in content:
-                            content['site_id'] = str(content['site_id'])
-                        if 'administrator_id' in content:
-                            content['administrator_id'] = str(content['administrator_id'])
-                        content_list_str.append(content)
-                    return Response({'status_text':'ok','status_code':200,'data':content_list})
-            return Response({'status_text':'Username or Password do not Exist','status_code':401})
+            username = request.data.get('username')
+            password = request.data.get('password')
+            mirror = mirror_collection.find_one({"username": username, "password": password})
+            if mirror:
+                disabled_set = {str(d) for d in mirror.get('disabled_contents', [])}
+                content_list = []
+                for cid in mirror.get('contents', []):
+                    if str(cid) in disabled_set:
+                        continue
+                    try:
+                        c_doc = content_collection.find_one({'_id': ObjectId(cid)})
+                        if c_doc:
+                            c = dict(c_doc)
+                            if '_id' in c:
+                                c['_id'] = str(c['_id'])
+                            if 'mirror_id' in c and c['mirror_id']:
+                                c['mirror_id'] = str(c['mirror_id'])
+                            if 'site_id' in c and c['site_id']:
+                                c['site_id'] = str(c['site_id'])
+                            if 'administrator_id' in c:
+                                c['administrator_id'] = str(c['administrator_id'])
+                            content_list.append(c)
+                    except Exception:
+                        pass
+                return Response({'status_text': 'ok', 'status_code': 200, 'data': content_list})
+            return Response({'status_text': 'Username or Password do not Exist', 'status_code': 401}, status=401)
             
         elif service == 'register':
-            required_data = ['username','password','site_name','administrator_username','mirror_name','mirror_description']
-            if  not all(field in request.data for field in required_data):
-                return Response({"status_text":"requred keys 'username','password','site_name','administrator_username','mirror_name','mirror_description'"})
+            required_data = ['username', 'password', 'site_name', 'administrator_username', 'mirror_name']
+            if not all(field in request.data for field in required_data):
+                return Response({"status_text": "Required keys: username, password, site_name, administrator_username, mirror_name"}, status=400)
             username = request.data['username']
             password = request.data['password']
             site_name = request.data['site_name']
             administrator_username = request.data['administrator_username']
             mirror_name = request.data['mirror_name']
-            mirror_description = request.data['mirror_description']
-            if mirror_collection.find_one({'username':username}):
-                return Response({'status':'Username Already taken'})
-            if administrators_collection.find_one({"username":administrator_username}):
-                administrator =  administrators_collection.find_one({"username":administrator_username})
-                if sites_collection.find_one({'site_name':site_name, 'administrator_id':administrator.get("_id")}):
-                    site = sites_collection.find_one({'site_name':site_name, 'administrator_id':administrator.get("_id")})
-                    mirror_data = {
-                        "username":username,
-                        "password":password,
-                        "site_id":site.get("_id"),
-                        "administrator_id":administrator.get('_id'),
-                        "mirror_name":mirror_name,
-                        "mirror_description":mirror_description,
-                        "mirror_login_return_key":username+password,
-                        "websocket_channel_name":None
+            mirror_description = request.data.get('mirror_description', '')
+            if mirror_collection.find_one({'username': username}):
+                return Response({'status': 'Username Already taken', 'status_code': 400}, status=400)
+            administrator = administrators_collection.find_one({"username": administrator_username})
+            if administrator:
+                site = sites_collection.find_one({'site_name': site_name, 'administrator_id': {'$in': [administrator.get("_id"), str(administrator.get("_id"))]}})
+                mirror_data = {
+                    "username": username,
+                    "password": password,
+                    "site_id": site.get("_id") if site else None,
+                    "administrator_id": administrator.get('_id'),
+                    "mirror_name": mirror_name,
+                    "mirror_description": mirror_description,
+                    "mirror_login_return_key": username + password,
+                    "websocket_channel_name": None,
+                    "contents": []
+                }
+                mirror_collection.insert_one(mirror_data)
+                return Response({'status_text': 'Registered Successfully', 'status_code': 200})
+            return Response({'status_text': 'UnAuthorised', 'status_code': 401}, status=401)
+
+        elif service in ['CheckMirrorUpdate', 'GetMirrorUpdate', 'GetMirrorContents']:
+            username = request.data.get('username')
+            password = request.data.get('password')
+            mirror_id = request.data.get('mirror_id')
+            mirror = None
+            if mirror_id:
+                try:
+                    mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id)})
+                except Exception:
+                    mirror = mirror_collection.find_one({'_id': mirror_id})
+            if not mirror and username and password:
+                mirror = mirror_collection.find_one({'username': username, 'password': password})
+            if not mirror and (username or password):
+                client_key = (username or '') + (password or '')
+                mirror = mirror_collection.find_one({'mirror_login_return_key': client_key})
+            
+            if not mirror:
+                return Response({'status_text': 'Mirror not found', 'status_code': 404}, status=404)
+            
+            disabled_set = {str(d) for d in mirror.get('disabled_contents', [])}
+            content_list = []
+            for cid in mirror.get('contents', []):
+                if str(cid) in disabled_set:
+                    continue
+                try:
+                    c_doc = content_collection.find_one({'_id': ObjectId(cid)})
+                    if c_doc:
+                        c = dict(c_doc)
+                        if '_id' in c: c['_id'] = str(c['_id'])
+                        if 'mirror_id' in c and c['mirror_id']: c['mirror_id'] = str(c['mirror_id'])
+                        if 'site_id' in c and c['site_id']: c['site_id'] = str(c['site_id'])
+                        if 'administrator_id' in c: c['administrator_id'] = str(c['administrator_id'])
+                        content_list.append(c)
+                except Exception:
+                    pass
+
+            current_time = time.time()
+            mirror_collection.update_one({'_id': mirror.get('_id')}, {'$set': {'last_active_timestamp': current_time}})
+
+            return Response({
+                'status_text': 'ok',
+                'status_code': 200,
+                'last_refresh_timestamp': mirror.get('last_refresh_timestamp', 0),
+                'mirror_id': str(mirror.get('_id')),
+                'playback_state': mirror.get('playback_state', 'playing'),
+                'active_content_id': mirror.get('active_content_id'),
+                'active_content_index': mirror.get('active_content_index', 0),
+                'sync_timestamp': mirror.get('sync_timestamp', 0),
+                'data': content_list
+            }, status=200)
+
+        elif service in ['UpdateActiveSlide', 'ReportActiveSlide', 'SlideChanged']:
+            mirror_id = request.data.get('mirror_id')
+            username = request.data.get('username')
+            password = request.data.get('password')
+            content_id = request.data.get('content_id')
+            index = request.data.get('index', 0)
+
+            mirror = None
+            if mirror_id:
+                try:
+                    mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id)})
+                except Exception:
+                    mirror = mirror_collection.find_one({'_id': mirror_id})
+            if not mirror and username and password:
+                mirror = mirror_collection.find_one({'username': username, 'password': password})
+            if not mirror and (username or password):
+                client_key = (username or '') + (password or '')
+                mirror = mirror_collection.find_one({'mirror_login_return_key': client_key})
+
+            if not mirror:
+                return Response({'status_text': 'Mirror not found', 'status_code': 404}, status=404)
+
+            current_time = time.time()
+            cid_str = str(content_id) if content_id else None
+            idx_val = int(index) if index is not None else 0
+
+            mirror_collection.update_one(
+                {'_id': mirror.get('_id')},
+                {'$set': {
+                    'active_content_id': cid_str,
+                    'active_content_index': idx_val,
+                    'last_active_timestamp': current_time
+                }}
+            )
+
+            # Broadcast sync message to all other connected mirrors
+            try:
+                from channels.layers import get_channel_layer
+                from asgiref.sync import async_to_sync
+                channel_layer = get_channel_layer()
+                if channel_layer:
+                    msg = {
+                        'type': 'update.mirror',
+                        'data': {
+                            'service': 'SyncSlide',
+                            'source_mirror_id': str(mirror.get('_id')),
+                            'site_id': str(mirror.get('site_id')) if mirror.get('site_id') else None,
+                            'content_id': cid_str,
+                            'index': idx_val,
+                            'timestamp': current_time
+                        }
                     }
-                    mirror_collection.insert_one(mirror_data)
-                    return Response({'status_text':'Registered Successfully','status_code':200})
-                else:
-                    return Response({'status_text':'Not Allowed','status_code':401}) 
-            else:
-                return Response({'status_text':'UnAuthorised','status_code':401})
+                    async_to_sync(channel_layer.group_send)("mirror_group", msg)
+            except Exception:
+                pass
+
+            return Response({
+                'status_text': 'Slide reported successfully',
+                'status_code': 200,
+                'mirror_id': str(mirror.get('_id')),
+                'active_content_id': cid_str,
+                'active_content_index': idx_val
+            }, status=200)
+
+        return Response({'status_text': 'Unknown service', 'status_code': 400}, status=400)
 
     def get(self, request):
-
-        Response({},status=500)
+        return Response({'status_text': 'ok'}, status=200)

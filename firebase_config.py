@@ -1,5 +1,6 @@
 # firebase_config.py
 
+import os
 import re
 import firebase_admin
 from firebase_admin import credentials, storage
@@ -7,10 +8,16 @@ import urllib.parse
 
 def configure():
     # Initialize Firebase app with credentials
-    cred = credentials.Certificate('firebase_key.json')
-    firebase_admin.initialize_app(cred, {
-        'storageBucket': 'mirrorlink-22549.appspot.com'
-    })
+    if not os.path.exists('firebase_key.json'):
+        print("Notice: firebase_key.json not found. Firebase features running in fallback mode.")
+        return
+    try:
+        cred = credentials.Certificate('firebase_key.json')
+        firebase_admin.initialize_app(cred, {
+            'storageBucket': 'mirrorlink-22549.appspot.com'
+        })
+    except Exception as e:
+        print(f"Notice: Failed to initialize Firebase: {e}")
 
 
 
