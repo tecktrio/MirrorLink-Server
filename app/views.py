@@ -5,14 +5,7 @@ from bson import ObjectId
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from .models import administrators_collection, mirror_collection, sites_collection, content_collection
-from firebase_admin import storage
-from firebase_config import configure, delete_file_from_public_url
-
-configure()
-try:
-    bucket = storage.bucket()
-except Exception:
-    bucket = None
+from s3_config import upload_file_to_s3, delete_file_from_s3
 
 
 def get_administrator(login_key=None):
@@ -113,15 +106,9 @@ class Administrator(APIView):
             with open(file_path, 'wb') as file:
                 file.write(decoded_file_data)
             
-            content_url = f"http://127.0.0.1:8000/Contents/{file_name}"
-            if bucket:
-                try:
-                    blob = bucket.blob(f'contents/{file_name}')
-                    blob.upload_from_filename(file_path)
-                    blob.make_public()
-                    content_url = blob.public_url
-                except Exception as e:
-                    print(f'Firebase upload fallback to local URL: {e}')
+            # Upload to AWS S3 (or fallback to local URL if S3 is unavailable)
+            s3_url = upload_file_to_s3(file_path, object_name=f"contents/{file_name}")
+            content_url = s3_url if s3_url else f"http://127.0.0.1:8000/Contents/{file_name}"
 
             # Find mirror if mirror_id provided
             mirror = None
@@ -743,9 +730,16 @@ class Administrator(APIView):
             administrator = get_administrator(login_key)
             if administrator and content_id:
                 content = content_collection.find_one({'_id': ObjectId(content_id)})
-                if content and 'content_url' in content and delete_file_from_public_url:
+                if content and 'content_url' in content:
                     try:
-                        delete_file_from_public_url(content["content_url"])
+                        delete_file_from_s3(content["content_url"])
+                    except Exception:
+                        pass
+                    try:
+                        local_name = content["content_url"].split('/')[-1]
+                        local_path = os.path.join('Contents', local_name)
+                        if os.path.exists(local_path):
+                            os.remove(local_path)
                     except Exception:
                         pass
                 content_collection.delete_one({'_id': ObjectId(content_id)})

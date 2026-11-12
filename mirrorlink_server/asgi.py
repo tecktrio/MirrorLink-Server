@@ -5,7 +5,6 @@ from channels.auth import AuthMiddlewareStack
 from mirrorlink_server.routing import websocket_urlpatterns
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'mirrorlink_server.settings')
-import firebase_config 
 application = ProtocolTypeRouter({
     "http": get_asgi_application(),  # Handles HTTP requests with ASGI app
     "websocket": AuthMiddlewareStack(

@@ -5,7 +5,7 @@ import time
 from channels.generic.websocket import AsyncWebsocketConsumer
 from channels.layers import get_channel_layer
 from app.models import mirror_collection, administrators_collection, content_collection, sites_collection
-from firebase_admin import storage
+from s3_config import upload_file_to_s3
 
 from bson.objectid import ObjectId
 users = []
@@ -103,16 +103,9 @@ class ControllerConsumer(AsyncWebsocketConsumer):
                 with open(file_path, 'wb') as file:
                     file.write(decoded_file_data)
 
-                # Upload the file to Firebase Storage
-                bucket = storage.bucket()
-                blob = bucket.blob(f'uploads/{content_title}')
-                blob.upload_from_filename(file_path)
-
-                # Make the file publicly accessible
-                blob.make_public()
-
-                # Get the public URL for the uploaded file
-                content_url = blob.public_url
+                # Upload the file to AWS S3 (or fallback to local URL)
+                s3_url = upload_file_to_s3(file_path, object_name=f"uploads/{content_title}")
+                content_url = s3_url if s3_url else f"http://127.0.0.1:8000/Contents/{content_title}"
 
                 administrator_id = self.administrator.get('_id')
                 # print('admin id',administrator_id)# Query the site

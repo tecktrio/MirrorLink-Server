@@ -1,13 +1,18 @@
 import os
+from pathlib import Path
+from dotenv import load_dotenv
 import pymongo
 from pymongo import MongoClient
 
-# MongoDB Atlas connection configuration
-MONGODB_URI = os.environ.get(
-    "MONGODB_URI",
-    "mongodb+srv://amalpullan4_db_user:oaoZdFeUppQljcZA@cluster0.xg3zwpq.mongodb.net/"
-)
+# Load environment variables from .env file
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(os.path.join(BASE_DIR, ".env"))
+
+MONGODB_URI = os.environ.get("MONGODB_URI")
 DATABASE_NAME = os.environ.get("MONGODB_DB", "mirrorlink")
+
+if not MONGODB_URI:
+    raise ValueError("[MongoDB] MONGODB_URI is not set in environment or .env file.")
 
 print(f"[MongoDB] Initializing database connection to '{DATABASE_NAME}'...")
 
