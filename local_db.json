@@ -74,9 +74,9 @@
       "last_active_timestamp": 1794495308.580238,
       "playback_state": "playing",
       "last_state_change_timestamp": 1794494044.613036,
-      "active_content_id": "6af5c12a32a396041438d7d9",
-      "active_content_index": 1,
-      "sync_timestamp": 1794495492.585272,
+      "active_content_id": "6af5c5b5a07000b29941e3b9",
+      "active_content_index": 2,
+      "sync_timestamp": 1794495540.580263,
       "disabled_contents": [
         {
           "$oid": "6af5b29a10cc8737d989927c"
@@ -113,9 +113,9 @@
       "websocket_channel_name": "specific..inmemory!bHFDZWIrPVVJ",
       "mirror_login_return_key": "testtest",
       "last_active_timestamp": 1794489892.50459,
-      "active_content_id": "6af5c12a32a396041438d7d9",
-      "active_content_index": 1,
-      "sync_timestamp": 1794495492.585272,
+      "active_content_id": "6af5c5b5a07000b29941e3b9",
+      "active_content_index": 2,
+      "sync_timestamp": 1794495540.580263,
       "slide_start_timestamp": 1794489888.899507,
       "playback_state": "playing",
       "last_state_change_timestamp": 1794489738.953273
@@ -134,7 +134,7 @@
         "$oid": "6af55a21e3ee10acbfe0a733"
       },
       "playback_state": "playing",
-      "last_active_timestamp": 1794495493.5765288,
+      "last_active_timestamp": 1794495543.57008,
       "contents": [
         {
           "$oid": "6af5be4b32a396041438d7d8"
@@ -155,10 +155,10 @@
       "websocket_channel_name": "specific..inmemory!SoDFqIdsMafB",
       "mirror_login_return_key": "t3",
       "last_state_change_timestamp": 1794495293.970067,
-      "active_content_id": "6af5c12a32a396041438d7d9",
-      "active_content_index": 1,
-      "sync_timestamp": 1794495492.585272,
-      "slide_start_timestamp": 1794495492.5686789,
+      "active_content_id": "6af5c5b5a07000b29941e3b9",
+      "active_content_index": 2,
+      "sync_timestamp": 1794495540.580263,
+      "slide_start_timestamp": 1794495540.5672991,
       "last_refresh_timestamp": 1794491956.7270641,
       "content_durations": {
         "6af5be4b32a396041438d7d8": 2,
