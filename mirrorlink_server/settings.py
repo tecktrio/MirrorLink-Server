@@ -139,6 +139,13 @@ STATIC_URL = 'static/'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # ==========================================
+# File & Data Upload Limits (Allow Videos up to 500MB)
+# ==========================================
+DATA_UPLOAD_MAX_MEMORY_SIZE = 524288000  # 500 MB
+FILE_UPLOAD_MAX_MEMORY_SIZE = 524288000  # 500 MB
+DATA_UPLOAD_MAX_NUMBER_FIELDS = 10000
+
+# ==========================================
 # CORS & Origin Configuration - Allow Everywhere
 # ==========================================
 CORS_ALLOW_ALL_ORIGINS = True

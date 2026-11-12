@@ -92,23 +92,57 @@ class Administrator(APIView):
             content = request.data.get('content')
             content_title = request.data.get('content_title')
             content_description = request.data.get('content_description', '')
-            file_extention = request.data.get('file_extention', 'jpg')
+            raw_ext = str(request.data.get('file_extention', 'jpg')).lower().strip('.')
             mirror_id = request.data.get('mirror_id')
             duration = request.data.get('duration')
             if not content or not content_title:
                 return Response({'status_text': 'content and content_title required', 'status_code': 400}, status=400)
 
+            # Normalize file extension
+            if raw_ext in ['quicktime', 'mov']:
+                file_extention = 'mov'
+            elif raw_ext in ['mp4', 'video/mp4', 'm4v']:
+                file_extention = 'mp4'
+            elif raw_ext in ['webm', 'video/webm']:
+                file_extention = 'webm'
+            elif raw_ext in ['jpeg', 'jpg', 'image/jpeg']:
+                file_extention = 'jpeg'
+            elif raw_ext in ['png', 'image/png']:
+                file_extention = 'png'
+            elif raw_ext in ['webp', 'image/webp']:
+                file_extention = 'webp'
+            else:
+                file_extention = raw_ext
+
+            is_video = file_extention in ['mp4', 'mov', 'webm', 'm4v', 'quicktime', 'mkv', 'avi'] or (content and 'video' in content[:50])
+
             file_data = content.split(',')[1] if ',' in content else content
             decoded_file_data = base64.b64decode(file_data)
             os.makedirs('Contents', exist_ok=True)
-            file_name = f"{content_title}_{str(administrator_id)}.{file_extention}"
+            
+            # Clean safe filename for disk and S3
+            safe_title = "".join(c for c in content_title if c.isalnum() or c in ('-', '_')).rstrip()
+            if not safe_title:
+                safe_title = "content"
+            file_name = f"{safe_title}_{str(administrator_id)}.{file_extention}"
             file_path = os.path.join('Contents', file_name)
             with open(file_path, 'wb') as file:
                 file.write(decoded_file_data)
             
-            # Upload to AWS S3 (or fallback to local URL if S3 is unavailable)
-            s3_url = upload_file_to_s3(file_path, object_name=f"contents/{file_name}")
-            content_url = s3_url if s3_url else f"http://127.0.0.1:8000/Contents/{file_name}"
+            # Upload to AWS S3 with explicit ContentType
+            content_type = None
+            if is_video:
+                if file_extention == 'mp4':
+                    content_type = 'video/mp4'
+                elif file_extention == 'mov':
+                    content_type = 'video/quicktime'
+                elif file_extention == 'webm':
+                    content_type = 'video/webm'
+                else:
+                    content_type = f'video/{file_extention}'
+
+            s3_url = upload_file_to_s3(file_path, object_name=f"contents/{file_name}", content_type=content_type)
+            content_url = s3_url if s3_url else f"https://mirrorlink.bigburry.com/Contents/{file_name}"
 
             # Find mirror if mirror_id provided
             mirror = None
@@ -125,7 +159,6 @@ class Administrator(APIView):
                         req_w = request.data.get('width')
                         req_h = request.data.get('height')
                         # Strict resolution matching is required for images; videos are auto-scaled and play natively
-                        is_video = str(file_extention).lower() in ['mp4', 'mov', 'webm', 'm4v']
                         if not is_video and req_w is not None and req_h is not None:
                             if int(req_w) != mirror_w or int(req_h) != mirror_h:
                                 return Response({
@@ -141,7 +174,7 @@ class Administrator(APIView):
                 "content_title": content_title,
                 "content_description": content_description,
                 "content_url": content_url,
-                "content_format": file_extention,
+                "content_format": "mp4" if (is_video and file_extention not in ['webm', 'mov']) else file_extention,
                 "is_active": True,
                 "order": len(mirror.get('contents', [])) + 1 if mirror else 1
             }

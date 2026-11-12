@@ -39,6 +39,7 @@ class ControllerConsumer(AsyncWebsocketConsumer):
                 # self.send(text_data="welcome to the service update mirror")
 
         else:
+            # pyrefly: ignore[unused-coroutine]
             self.close()
 
     async def disconnect(self, close_code):
