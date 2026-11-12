@@ -76,7 +76,7 @@
       "last_state_change_timestamp": 1794494044.613036,
       "active_content_id": "6af5c12a32a396041438d7d9",
       "active_content_index": 1,
-      "sync_timestamp": 1794495477.596884,
+      "sync_timestamp": 1794495492.585272,
       "disabled_contents": [
         {
           "$oid": "6af5b29a10cc8737d989927c"
@@ -115,7 +115,7 @@
       "last_active_timestamp": 1794489892.50459,
       "active_content_id": "6af5c12a32a396041438d7d9",
       "active_content_index": 1,
-      "sync_timestamp": 1794495477.596884,
+      "sync_timestamp": 1794495492.585272,
       "slide_start_timestamp": 1794489888.899507,
       "playback_state": "playing",
       "last_state_change_timestamp": 1794489738.953273
@@ -134,7 +134,7 @@
         "$oid": "6af55a21e3ee10acbfe0a733"
       },
       "playback_state": "playing",
-      "last_active_timestamp": 1794495477.5985532,
+      "last_active_timestamp": 1794495493.5765288,
       "contents": [
         {
           "$oid": "6af5be4b32a396041438d7d8"
@@ -157,8 +157,8 @@
       "last_state_change_timestamp": 1794495293.970067,
       "active_content_id": "6af5c12a32a396041438d7d9",
       "active_content_index": 1,
-      "sync_timestamp": 1794495477.596884,
-      "slide_start_timestamp": 1794495477.586987,
+      "sync_timestamp": 1794495492.585272,
+      "slide_start_timestamp": 1794495492.5686789,
       "last_refresh_timestamp": 1794491956.7270641,
       "content_durations": {
         "6af5be4b32a396041438d7d8": 2,
