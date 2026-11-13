@@ -911,6 +911,19 @@ class Administrator(APIView):
             except Exception as e:
                 print(f"Playback control broadcast notice: {e}")
 
+            # Instantly broadcast playback change to all SSE connected screens
+            try:
+                from app.conductor import get_or_create_conductor
+                conductor = get_or_create_conductor(mirror['_id'])
+                conductor.broadcast('playback_control', {
+                    'action': new_state,
+                    'mirror_id': str(mirror.get('_id')),
+                    'timestamp': current_time
+                })
+                conductor.notify_state_change()
+            except Exception as e:
+                print(f"SSE playback control notice: {e}")
+
             return Response({
                 'status_text': f'Playback state set to {new_state}',
                 'status_code': 200,
@@ -1291,3 +1304,76 @@ class Mirror(APIView):
 
     def get(self, request):
         return Response({'status_text': 'ok'}, status=200)
+
+
+class MirrorStreamView(APIView):
+    """
+    Real-Time Server-Sent Events (SSE) Stream for Display Viewers.
+    The server holds a persistent HTTP connection to every display, pushing
+    synchronized slide transitions and playback commands to 100+ screens simultaneously.
+    """
+
+    def get(self, request):
+        from django.http import StreamingHttpResponse, HttpResponse
+        from app.conductor import get_or_create_conductor
+        import queue
+
+        mirror_name = request.GET.get('mirror_name')
+        mirror_id = request.GET.get('mirror_id')
+        username = request.GET.get('username')
+
+        mirror = None
+        if mirror_name:
+            import re
+            clean_name = str(mirror_name).strip()
+            mirror = mirror_collection.find_one({'mirror_name': clean_name})
+            if not mirror:
+                mirror = mirror_collection.find_one({'mirror_name': {'$regex': f'^{re.escape(clean_name)}$', '$options': 'i'}})
+
+        if not mirror and mirror_id:
+            try:
+                mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id)})
+            except Exception:
+                mirror = mirror_collection.find_one({'_id': mirror_id})
+
+        if not mirror and username:
+            clean_u = str(username).strip()
+            mirror = mirror_collection.find_one({'mirror_name': clean_u})
+            if not mirror:
+                mirror = mirror_collection.find_one({'username': clean_u})
+
+        if not mirror:
+            return HttpResponse(
+                "event: error\ndata: " + json.dumps({'status_code': 404, 'status_text': 'Mirror not found'}) + "\n\n",
+                content_type="text/event-stream",
+                status=404
+            )
+
+        conductor = get_or_create_conductor(mirror['_id'])
+        client_queue = queue.Queue(maxsize=100)
+        conductor.add_listener(client_queue)
+
+        def event_stream():
+            try:
+                # 1. Send initial state immediately so the viewer displays media without waiting
+                initial_state = conductor.get_initial_state(mirror)
+                yield f"event: init\ndata: {json.dumps(initial_state)}\n\n"
+
+                # 2. Stream synchronized slide triggers pushed by the server conductor
+                while True:
+                    try:
+                        msg = client_queue.get(timeout=20)
+                        yield f"event: {msg['event']}\ndata: {json.dumps(msg['data'])}\n\n"
+                    except queue.Empty:
+                        # Periodic keepalive comment to keep connection alive through Nginx & proxies
+                        yield ": keepalive\n\n"
+            except (GeneratorExit, Exception):
+                pass
+            finally:
+                conductor.remove_listener(client_queue)
+
+        response = StreamingHttpResponse(event_stream(), content_type='text/event-stream')
+        response['Cache-Control'] = 'no-cache, no-transform'
+        response['X-Accel-Buffering'] = 'no'  # Disables Nginx response buffering for real-time delivery
+        response['Access-Control-Allow-Origin'] = '*'
+        return response

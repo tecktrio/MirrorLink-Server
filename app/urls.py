@@ -16,10 +16,10 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path
-from .views import Administrator,Mirror
+from .views import Administrator, Mirror, MirrorStreamView
 
 urlpatterns = [
-    path('Administrator',Administrator.as_view()),
-    path('Mirror',Mirror.as_view())
-
+    path('Administrator', Administrator.as_view()),
+    path('Mirror', Mirror.as_view()),
+    path('MirrorStream', MirrorStreamView.as_view()),
 ]
