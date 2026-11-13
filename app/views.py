@@ -1208,7 +1208,14 @@ class Mirror(APIView):
                     pass
 
             current_time = time.time()
-            mirror_collection.update_one({'_id': mirror.get('_id')}, {'$set': {'last_active_timestamp': current_time}})
+            mirror_collection.update_one({'_id': mirror.get('_id')}, {'$set': {'last_active_timestamp': current_time, 'status': 'active'}})
+            # A logged-in display activates its server-side virtual screen clock.
+            # The clock publishes each next-content trigger to the mirror MQTT topic.
+            try:
+                from app.conductor import get_or_create_conductor
+                get_or_create_conductor(mirror.get('_id')).start()
+            except Exception as exc:
+                print(f"Virtual screen startup notice: {exc}")
 
             return Response({
                 'status_text': 'ok',
@@ -1222,6 +1229,27 @@ class Mirror(APIView):
                 'sync_timestamp': mirror.get('sync_timestamp', 0),
                 'data': content_list
             }, status=200)
+
+        elif service == 'ReportContentDuration':
+            mirror_id = request.data.get('mirror_id')
+            content_id = request.data.get('content_id')
+            duration = request.data.get('duration')
+            try:
+                duration = max(1, int(float(duration)))
+                mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id)})
+                if not mirror or not content_id:
+                    raise ValueError('missing mirror or content')
+                previous = int(mirror.get('content_durations', {}).get(str(content_id), 0) or 0)
+                if abs(previous - duration) > 1:
+                    mirror_collection.update_one(
+                        {'_id': mirror['_id']},
+                        {'$set': {f'content_durations.{content_id}': duration}}
+                    )
+                    from app.conductor import notify_mirror_updated
+                    notify_mirror_updated(mirror['_id'])
+                return Response({'status_text': 'Video duration recorded', 'status_code': 200})
+            except Exception as exc:
+                return Response({'status_text': f'Invalid video duration report: {exc}', 'status_code': 400}, status=400)
 
         elif service in ['UpdateActiveSlide', 'ReportActiveSlide', 'SlideChanged']:
             mirror_name = request.data.get('mirror_name')

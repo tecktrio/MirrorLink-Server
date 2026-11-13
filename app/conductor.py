@@ -2,6 +2,7 @@ import time
 import json
 import queue
 import threading
+import os
 from bson.objectid import ObjectId
 from app.models import mirror_collection, content_collection
 
@@ -22,10 +23,43 @@ class MirrorConductor:
         self.interrupt_event = threading.Event()
         self.current_index = 0
         self.last_known_refresh = 0
+        self.mqtt_client = None
+
+    def publish(self, event_type, data, retain=False):
+        """Publish a JSON event to every display subscribed to this mirror."""
+        broker = os.environ.get('MQTT_BROKER_HOST')
+        if not broker:
+            return
+        try:
+            import paho.mqtt.client as mqtt
+            if self.mqtt_client is None:
+                client_id = f"mirrorlink-server-{str(self.mirror_id)}"
+                try:
+                    self.mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id=client_id)
+                except (AttributeError, TypeError):
+                    self.mqtt_client = mqtt.Client(client_id=client_id)
+                username = os.environ.get('MQTT_USERNAME')
+                password = os.environ.get('MQTT_PASSWORD')
+                if username:
+                    self.mqtt_client.username_pw_set(username, password)
+                port = int(os.environ.get('MQTT_BROKER_PORT', '1883'))
+                self.mqtt_client.connect(broker, port, keepalive=30)
+                self.mqtt_client.loop_start()
+            self.mqtt_client.publish(f"mirror/{self.mirror_id}", json.dumps({'event': event_type, 'data': data}), qos=1, retain=retain)
+        except Exception as exc:
+            print(f"[MQTT publish error]: {exc}")
 
     def add_listener(self, client_queue):
         with self.lock:
             self.listeners.add(client_queue)
+            if not self.is_running or not self.thread or not self.thread.is_alive():
+                self.is_running = True
+                self.thread = threading.Thread(target=self._run_loop, daemon=True)
+                self.thread.start()
+
+    def start(self):
+        """Start the virtual screen clock when the first physical display logs in."""
+        with self.lock:
             if not self.is_running or not self.thread or not self.thread.is_alive():
                 self.is_running = True
                 self.thread = threading.Thread(target=self._run_loop, daemon=True)
@@ -40,6 +74,7 @@ class MirrorConductor:
             return len(self.listeners) > 0
 
     def broadcast(self, event_type, data):
+        self.publish(event_type, data, retain=event_type in ('init', 'standby'))
         dead_queues = []
         with self.lock:
             for q in list(self.listeners):
@@ -121,14 +156,8 @@ class MirrorConductor:
         idle_count = 0
         while True:
             try:
-                if not self.has_listeners():
-                    idle_count += 1
-                    if idle_count > 30:  # 30 seconds with 0 connected displays -> shut down background loop
-                        break
-                    time.sleep(1.0)
-                    continue
-                else:
-                    idle_count = 0
+                # The conductor is the server-side virtual screen. It runs even
+                # without connected browser viewers, so media completion is known.
 
                 mirror = mirror_collection.find_one({'_id': self.mirror_id})
                 if not mirror:
@@ -177,17 +206,22 @@ class MirrorConductor:
                     }}
                 )
 
-                # Broadcast slide_change trigger to all connected mirror displays simultaneously
+                # Publish the requested content, not just its playlist index,
+                # so every topic subscriber can render the same item.
                 self.broadcast('slide_change', {
                     'index': self.current_index,
                     'content_id': cid,
                     'content_url': current_item.get('content_url'),
                     'content_format': current_item.get('content_format'),
+                    'content': current_item,
                     'duration': remaining,
                     'timestamp': now
                 })
 
                 # Sleep until this slide's slot ends (or until admin interrupts)
+                # Keep the server's virtual playback clock aligned to actual
+                # video duration when metadata is available; configured photo
+                # durations remain the timing source for images.
                 interrupted = self.interrupt_event.wait(timeout=max(0.5, remaining))
                 if interrupted:
                     self.interrupt_event.clear()
