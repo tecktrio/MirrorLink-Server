@@ -1306,14 +1306,29 @@ class Mirror(APIView):
         return Response({'status_text': 'ok'}, status=200)
 
 
-class MirrorStreamView(APIView):
+from django.views import View
+from django.views.decorators.csrf import csrf_exempt
+from django.utils.decorators import method_decorator
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class MirrorStreamView(View):
     """
     Real-Time Server-Sent Events (SSE) Stream for Display Viewers.
+    Bypasses DRF Content Negotiation to natively support 'Accept: text/event-stream'.
     The server holds a persistent HTTP connection to every display, pushing
     synchronized slide transitions and playback commands to 100+ screens simultaneously.
     """
 
-    def get(self, request):
+    def options(self, request, *args, **kwargs):
+        from django.http import HttpResponse
+        response = HttpResponse()
+        response['Access-Control-Allow-Origin'] = '*'
+        response['Access-Control-Allow-Headers'] = '*'
+        response['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+        return response
+
+    def get(self, request, *args, **kwargs):
         from django.http import StreamingHttpResponse, HttpResponse
         from app.conductor import get_or_create_conductor
         import queue
@@ -1343,11 +1358,13 @@ class MirrorStreamView(APIView):
                 mirror = mirror_collection.find_one({'username': clean_u})
 
         if not mirror:
-            return HttpResponse(
+            resp = HttpResponse(
                 "event: error\ndata: " + json.dumps({'status_code': 404, 'status_text': 'Mirror not found'}) + "\n\n",
                 content_type="text/event-stream",
                 status=404
             )
+            resp['Access-Control-Allow-Origin'] = '*'
+            return resp
 
         conductor = get_or_create_conductor(mirror['_id'])
         client_queue = queue.Queue(maxsize=100)
@@ -1376,4 +1393,6 @@ class MirrorStreamView(APIView):
         response['Cache-Control'] = 'no-cache, no-transform'
         response['X-Accel-Buffering'] = 'no'  # Disables Nginx response buffering for real-time delivery
         response['Access-Control-Allow-Origin'] = '*'
+        response['Access-Control-Allow-Headers'] = '*'
+        response['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
         return response
