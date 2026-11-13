@@ -79,8 +79,33 @@ class MirrorConductor:
                 pass
         return content_list
 
+    def calculate_timeline_slot(self, contents, mirror):
+        if not contents:
+            return 0, 5, time.time()
+        photo_duration = mirror.get('photo_duration', 5)
+        content_durations = mirror.get('content_durations', {})
+        durations = []
+        for c in contents:
+            cid = str(c.get('_id'))
+            dur = int(content_durations.get(cid, c.get('duration') or photo_duration or 5))
+            durations.append(max(2, dur))
+        total_cycle = sum(durations)
+        if total_cycle <= 0:
+            total_cycle = len(contents) * 5
+        now = time.time()
+        pos = now % total_cycle
+        cum = 0
+        for idx, dur in enumerate(durations):
+            if cum + dur > pos:
+                remaining = (cum + dur) - pos
+                return idx, max(0.2, remaining), now
+            cum += dur
+        return 0, durations[0], now
+
     def get_initial_state(self, mirror):
         contents = self.get_active_contents(mirror)
+        current_idx, remaining, _ = self.calculate_timeline_slot(contents, mirror)
+        self.current_index = current_idx
         return {
             'status_text': 'ok',
             'status_code': 200,
@@ -136,18 +161,12 @@ class MirrorConductor:
                     self.interrupt_event.clear()
                     continue
 
-                if self.current_index >= len(contents):
-                    self.current_index = 0
-
+                # Universal Epoch Sync: Calculate current active slide and remaining time in this slot
+                slot_idx, remaining, now = self.calculate_timeline_slot(contents, mirror)
+                self.current_index = slot_idx
                 current_item = contents[self.current_index]
-                photo_duration = mirror.get('photo_duration', 5)
-                content_durations = mirror.get('content_durations', {})
                 cid = str(current_item.get('_id'))
 
-                item_duration = int(content_durations.get(cid, current_item.get('duration') or photo_duration or 5))
-                item_duration = max(2, item_duration)
-
-                now = time.time()
                 mirror_collection.update_one(
                     {'_id': self.mirror_id},
                     {'$set': {
@@ -164,18 +183,15 @@ class MirrorConductor:
                     'content_id': cid,
                     'content_url': current_item.get('content_url'),
                     'content_format': current_item.get('content_format'),
-                    'duration': item_duration,
+                    'duration': remaining,
                     'timestamp': now
                 })
 
-                # Sleep for the duration of the current slide, or interrupt if an admin pauses/edits
-                interrupted = self.interrupt_event.wait(timeout=item_duration)
+                # Sleep until this slide's slot ends (or until admin interrupts)
+                interrupted = self.interrupt_event.wait(timeout=max(0.5, remaining))
                 if interrupted:
                     self.interrupt_event.clear()
                     continue
-
-                # Move to next slide
-                self.current_index = (self.current_index + 1) % len(contents)
 
             except Exception as e:
                 print(f"[Conductor Loop Error]: {e}")
