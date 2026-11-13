@@ -3,6 +3,7 @@ import json
 import queue
 import threading
 import os
+from urllib.parse import urlparse
 from bson.objectid import ObjectId
 from app.models import mirror_collection, content_collection
 
@@ -10,8 +11,8 @@ from app.models import mirror_collection, content_collection
 class MirrorConductor:
     """
     Central Playback Conductor for Digital Signage Displays.
-    The server owns the master playback timeline and triggers slide transitions
-    across all connected display devices simultaneously via Server-Sent Events (SSE).
+    The server owns the master playback timeline and publishes slide transitions
+    to mirror MQTT topics (and legacy SSE listeners when present).
     """
 
     def __init__(self, mirror_id):
@@ -24,30 +25,65 @@ class MirrorConductor:
         self.current_index = 0
         self.last_known_refresh = 0
         self.mqtt_client = None
+        self.mqtt_missing_config_logged = False
+
+    def _mqtt_connected(self, client, userdata, flags, rc, *extra):
+        if rc == 0:
+            print(f"[MQTT] Broker connected for mirror {self.mirror_id}", flush=True)
+        else:
+            print(f"[MQTT] Broker rejected connection for mirror {self.mirror_id}: rc={rc}", flush=True)
+
+    def _mqtt_published(self, client, userdata, mid, *extra):
+        print(f"[MQTT] Broker acknowledged publish mirror={self.mirror_id} mid={mid}", flush=True)
 
     def publish(self, event_type, data, retain=False):
         """Publish a JSON event to every display subscribed to this mirror."""
         broker = os.environ.get('MQTT_BROKER_HOST')
+        broker_url = os.environ.get('MQTT_BROKER_URL')
+        parsed = None
+        secure = False
+        if broker_url:
+            parsed = urlparse(broker_url if '://' in broker_url else f'mqtt://{broker_url}')
+            broker = broker or parsed.hostname
+            secure = parsed.scheme in ('mqtts', 'ssl', 'tls')
         if not broker:
+            if not self.mqtt_missing_config_logged:
+                print(
+                    f"[MQTT] Not publishing for mirror {self.mirror_id}: set MQTT_BROKER_HOST or MQTT_BROKER_URL",
+                    flush=True
+                )
+                self.mqtt_missing_config_logged = True
             return
         try:
             import paho.mqtt.client as mqtt
             if self.mqtt_client is None:
                 client_id = f"mirrorlink-server-{str(self.mirror_id)}"
                 try:
-                    self.mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id=client_id)
+                    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id=client_id)
                 except (AttributeError, TypeError):
-                    self.mqtt_client = mqtt.Client(client_id=client_id)
+                    client = mqtt.Client(client_id=client_id)
                 username = os.environ.get('MQTT_USERNAME')
                 password = os.environ.get('MQTT_PASSWORD')
                 if username:
-                    self.mqtt_client.username_pw_set(username, password)
-                port = int(os.environ.get('MQTT_BROKER_PORT', '1883'))
-                self.mqtt_client.connect(broker, port, keepalive=30)
-                self.mqtt_client.loop_start()
-            self.mqtt_client.publish(f"mirror/{self.mirror_id}", json.dumps({'event': event_type, 'data': data}), qos=1, retain=retain)
+                    client.username_pw_set(username, password)
+                if secure:
+                    client.tls_set()
+                default_port = 8883 if secure else 1883
+                port = int(os.environ.get('MQTT_BROKER_PORT') or (parsed.port if parsed else None) or default_port)
+                client.on_connect = self._mqtt_connected
+                client.on_publish = self._mqtt_published
+                print(f"[MQTT] Connecting to {broker}:{port} for mirror {self.mirror_id}", flush=True)
+                client.connect_async(broker, port, keepalive=30)
+                client.loop_start()
+                self.mqtt_client = client
+            topic = f"mirror/{self.mirror_id}"
+            info = self.mqtt_client.publish(topic, json.dumps({'event': event_type, 'data': data}), qos=1, retain=retain)
+            if info.rc == mqtt.MQTT_ERR_SUCCESS:
+                print(f"[MQTT] Queued event={event_type} topic={topic} qos=1 retain={retain}", flush=True)
+            else:
+                print(f"[MQTT] Publish failed event={event_type} topic={topic} rc={info.rc}", flush=True)
         except Exception as exc:
-            print(f"[MQTT publish error]: {exc}")
+            print(f"[MQTT] Publish error mirror={self.mirror_id} event={event_type}: {exc}", flush=True)
 
     def add_listener(self, client_queue):
         with self.lock:
@@ -56,6 +92,7 @@ class MirrorConductor:
                 self.is_running = True
                 self.thread = threading.Thread(target=self._run_loop, daemon=True)
                 self.thread.start()
+                print(f"[VirtualScreen] Playback conductor started for mirror {self.mirror_id}", flush=True)
 
     def start(self):
         """Start the virtual screen clock when the first physical display logs in."""
@@ -64,6 +101,7 @@ class MirrorConductor:
                 self.is_running = True
                 self.thread = threading.Thread(target=self._run_loop, daemon=True)
                 self.thread.start()
+                print(f"[VirtualScreen] Playback conductor started for mirror {self.mirror_id}", flush=True)
 
     def remove_listener(self, client_queue):
         with self.lock:
@@ -74,7 +112,7 @@ class MirrorConductor:
             return len(self.listeners) > 0
 
     def broadcast(self, event_type, data):
-        self.publish(event_type, data, retain=event_type in ('init', 'standby'))
+        self.publish(event_type, data, retain=event_type in ('init', 'standby', 'slide_change', 'playback_control'))
         dead_queues = []
         with self.lock:
             for q in list(self.listeners):

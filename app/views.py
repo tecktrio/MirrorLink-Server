@@ -1034,6 +1034,31 @@ class Administrator(APIView):
             except Exception as e:
                 print(f"Sync broadcast notice: {e}")
 
+            # Keep the web virtual screen and physical viewers on the same
+            # MQTT trigger path for an operator-selected slide.
+            try:
+                from app.conductor import get_or_create_conductor
+                conductor = get_or_create_conductor(mirror.get('_id'))
+                item = None
+                if sync_cid:
+                    try:
+                        item_doc = content_collection.find_one({'_id': ObjectId(str(sync_cid))})
+                        item = serialize_doc(dict(item_doc)) if item_doc else None
+                    except Exception:
+                        item = None
+                if item:
+                    conductor.broadcast('slide_change', {
+                        'index': sync_index,
+                        'content_id': str(sync_cid),
+                        'content_url': item.get('content_url'),
+                        'content_format': item.get('content_format'),
+                        'content': item,
+                        'duration': int(mirror.get('content_durations', {}).get(str(sync_cid), mirror.get('photo_duration', 5))),
+                        'timestamp': current_time
+                    })
+            except Exception as e:
+                print(f"MQTT sync trigger notice: {e}")
+
             return Response({
                 'status_text': 'Sync signal broadcast to connected mirrors',
                 'status_code': 200,
