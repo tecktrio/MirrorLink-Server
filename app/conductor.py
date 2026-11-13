@@ -3,6 +3,7 @@ import json
 import queue
 import threading
 import os
+import socket
 from urllib.parse import urlparse
 from bson.objectid import ObjectId
 from app.models import mirror_collection, content_collection
@@ -26,6 +27,9 @@ class MirrorConductor:
         self.last_known_refresh = 0
         self.mqtt_client = None
         self.mqtt_missing_config_logged = False
+        self.conductor_owner = f"{socket.gethostname()}:{os.getpid()}"
+        self.lease_wait_logged = False
+        self.last_published_content_id = None
 
     def _mqtt_connected(self, client, userdata, flags, rc, *extra):
         if rc == 0:
@@ -80,28 +84,34 @@ class MirrorConductor:
             info = self.mqtt_client.publish(topic, json.dumps({'event': event_type, 'data': data}), qos=1, retain=retain)
             if info.rc == mqtt.MQTT_ERR_SUCCESS:
                 print(f"[MQTT] Queued event={event_type} topic={topic} qos=1 retain={retain}", flush=True)
+            elif info.rc == mqtt.MQTT_ERR_NO_CONN:
+                print(f"[MQTT] Waiting for broker connection before event={event_type} topic={topic}", flush=True)
             else:
-                print(f"[MQTT] Publish failed event={event_type} topic={topic} rc={info.rc}", flush=True)
+                print(f"[MQTT] Publish rejected event={event_type} topic={topic} rc={info.rc}", flush=True)
         except Exception as exc:
             print(f"[MQTT] Publish error mirror={self.mirror_id} event={event_type}: {exc}", flush=True)
 
     def add_listener(self, client_queue):
         with self.lock:
             self.listeners.add(client_queue)
-            if not self.is_running or not self.thread or not self.thread.is_alive():
-                self.is_running = True
-                self.thread = threading.Thread(target=self._run_loop, daemon=True)
-                self.thread.start()
-                print(f"[VirtualScreen] Playback conductor started for mirror {self.mirror_id}", flush=True)
+        self.start()
 
     def start(self):
-        """Start the virtual screen clock when the first physical display logs in."""
+        """Start playback for this mirror if this worker owns its distributed lease."""
+        mirror = mirror_collection.find_one({'_id': self.mirror_id})
+        if not mirror or not self._acquire_playback_lease(mirror):
+            return False
         with self.lock:
             if not self.is_running or not self.thread or not self.thread.is_alive():
+                mirror_collection.update_one(
+                    {'_id': self.mirror_id},
+                    {'$set': {'virtual_screen_active': True, 'virtual_screen_started_at': time.time()}}
+                )
                 self.is_running = True
                 self.thread = threading.Thread(target=self._run_loop, daemon=True)
                 self.thread.start()
                 print(f"[VirtualScreen] Playback conductor started for mirror {self.mirror_id}", flush=True)
+        return True
 
     def remove_listener(self, client_queue):
         with self.lock:
@@ -128,6 +138,42 @@ class MirrorConductor:
     def notify_state_change(self):
         """Wakes up the conductor loop immediately when an admin action occurs."""
         self.interrupt_event.set()
+
+    def _acquire_playback_lease(self, mirror):
+        """Elect one Uvicorn worker to publish a mirror's playback timeline."""
+        now = time.time()
+        # The loop renews this lease while waiting on long media slots.
+        lease_seconds = 60
+
+        current_owner = mirror.get('playback_conductor_owner')
+        lease_until = float(mirror.get('playback_conductor_lease_until', 0) or 0)
+        if current_owner == self.conductor_owner and lease_until > now + lease_seconds / 2:
+            return True
+
+        result = mirror_collection.update_one(
+            {
+                '_id': self.mirror_id,
+                '$or': [
+                    {'playback_conductor_owner': self.conductor_owner},
+                    {'playback_conductor_lease_until': {'$lt': now}},
+                    {'playback_conductor_lease_until': {'$exists': False}}
+                ]
+            },
+            {'$set': {
+                'playback_conductor_owner': self.conductor_owner,
+                'playback_conductor_lease_until': now + lease_seconds
+            }}
+        )
+        if result.matched_count:
+            if current_owner != self.conductor_owner:
+                print(f"[VirtualScreen] Conductor lease acquired mirror={self.mirror_id} owner={self.conductor_owner}", flush=True)
+            self.lease_wait_logged = False
+            return True
+
+        if not self.lease_wait_logged:
+            print(f"[VirtualScreen] Another worker owns mirror={self.mirror_id}; this worker will not publish its timeline", flush=True)
+            self.lease_wait_logged = True
+        return False
 
     def get_active_contents(self, mirror):
         disabled_set = {str(d) for d in mirror.get('disabled_contents', [])}
@@ -202,12 +248,19 @@ class MirrorConductor:
                     time.sleep(2.0)
                     continue
 
+                if not self._acquire_playback_lease(mirror):
+                    self.interrupt_event.wait(timeout=3.0)
+                    self.interrupt_event.clear()
+                    continue
+                contents = self.get_active_contents(mirror)
+
                 # Detect playlist updates (added, reordered, or removed content)
                 last_refresh = mirror.get('last_refresh_timestamp', 0)
                 if self.last_known_refresh != 0 and last_refresh > self.last_known_refresh:
                     self.last_known_refresh = last_refresh
                     fresh_contents = self.get_active_contents(mirror)
                     self.broadcast('update_playlist', {'data': fresh_contents})
+                    self.last_published_content_id = None
                 else:
                     self.last_known_refresh = last_refresh
 
@@ -217,8 +270,8 @@ class MirrorConductor:
                     self.interrupt_event.clear()
                     continue
 
-                contents = self.get_active_contents(mirror)
                 if not contents:
+                    self.last_published_content_id = None
                     self.broadcast('standby', {
                         'mirror_id': str(self.mirror_id),
                         'mirror_name': mirror.get('mirror_name', ''),
@@ -246,21 +299,25 @@ class MirrorConductor:
 
                 # Publish the requested content, not just its playlist index,
                 # so every topic subscriber can render the same item.
-                self.broadcast('slide_change', {
-                    'index': self.current_index,
-                    'content_id': cid,
-                    'content_url': current_item.get('content_url'),
-                    'content_format': current_item.get('content_format'),
-                    'content': current_item,
-                    'duration': remaining,
-                    'timestamp': now
-                })
+                if cid != self.last_published_content_id:
+                    self.broadcast('slide_change', {
+                        'index': self.current_index,
+                        'content_id': cid,
+                        'content_url': current_item.get('content_url'),
+                        'content_format': current_item.get('content_format'),
+                        'content': current_item,
+                        'duration': remaining,
+                        'timestamp': now
+                    })
+                    self.last_published_content_id = cid
 
                 # Sleep until this slide's slot ends (or until admin interrupts)
                 # Keep the server's virtual playback clock aligned to actual
                 # video duration when metadata is available; configured photo
                 # durations remain the timing source for images.
-                interrupted = self.interrupt_event.wait(timeout=max(0.5, remaining))
+                # Wake periodically to renew the per-mirror lease without
+                # republishing the same content event.
+                interrupted = self.interrupt_event.wait(timeout=max(0.5, min(15.0, remaining)))
                 if interrupted:
                     self.interrupt_event.clear()
                     continue

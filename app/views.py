@@ -1113,8 +1113,15 @@ class Mirror(APIView):
                 current_time = time.time()
                 mirror_collection.update_one(
                     {'_id': mirror.get('_id')},
-                    {'$set': {'last_active_timestamp': current_time}}
+                    {'$set': {'last_active_timestamp': current_time, 'status': 'active'}}
                 )
+                # Start the per-mirror server playback clock from the login
+                # branch that actually handles viewer service='login'.
+                try:
+                    from app.conductor import get_or_create_conductor
+                    get_or_create_conductor(mirror.get('_id')).start()
+                except Exception as exc:
+                    print(f"Virtual screen startup notice: {exc}", flush=True)
                 photo_duration = mirror.get('photo_duration', 5)
                 content_durations = mirror.get('content_durations', {})
                 disabled_set = {str(d) for d in mirror.get('disabled_contents', [])}
