@@ -68,10 +68,11 @@ class MirrorConductor:
                 c_doc = content_collection.find_one({'_id': ObjectId(cid)})
                 if c_doc:
                     c = dict(c_doc)
-                    if '_id' in c: c['_id'] = str(c['_id'])
-                    if 'mirror_id' in c and c['mirror_id']: c['mirror_id'] = str(c['mirror_id'])
-                    if 'site_id' in c and c['site_id']: c['site_id'] = str(c['site_id'])
-                    if 'administrator_id' in c: c['administrator_id'] = str(c['administrator_id'])
+                    for k, v in list(c.items()):
+                        if isinstance(v, ObjectId):
+                            c[k] = str(v)
+                        elif hasattr(v, 'isoformat'):
+                            c[k] = v.isoformat()
                     c['duration'] = int(content_durations.get(str(cid), photo_duration))
                     content_list.append(c)
             except Exception:
@@ -94,86 +95,91 @@ class MirrorConductor:
     def _run_loop(self):
         idle_count = 0
         while True:
-            if not self.has_listeners():
-                idle_count += 1
-                if idle_count > 30:  # 30 seconds with 0 connected displays -> shut down background loop
-                    break
-                time.sleep(1.0)
-                continue
-            else:
-                idle_count = 0
+            try:
+                if not self.has_listeners():
+                    idle_count += 1
+                    if idle_count > 30:  # 30 seconds with 0 connected displays -> shut down background loop
+                        break
+                    time.sleep(1.0)
+                    continue
+                else:
+                    idle_count = 0
 
-            mirror = mirror_collection.find_one({'_id': self.mirror_id})
-            if not mirror:
-                time.sleep(2.0)
-                continue
+                mirror = mirror_collection.find_one({'_id': self.mirror_id})
+                if not mirror:
+                    time.sleep(2.0)
+                    continue
 
-            # Detect playlist updates (added, reordered, or removed content)
-            last_refresh = mirror.get('last_refresh_timestamp', 0)
-            if self.last_known_refresh != 0 and last_refresh > self.last_known_refresh:
-                self.last_known_refresh = last_refresh
-                fresh_contents = self.get_active_contents(mirror)
-                self.broadcast('update_playlist', {'data': fresh_contents})
-            else:
-                self.last_known_refresh = last_refresh
+                # Detect playlist updates (added, reordered, or removed content)
+                last_refresh = mirror.get('last_refresh_timestamp', 0)
+                if self.last_known_refresh != 0 and last_refresh > self.last_known_refresh:
+                    self.last_known_refresh = last_refresh
+                    fresh_contents = self.get_active_contents(mirror)
+                    self.broadcast('update_playlist', {'data': fresh_contents})
+                else:
+                    self.last_known_refresh = last_refresh
 
-            playback_state = mirror.get('playback_state', 'playing')
-            if playback_state == 'paused':
-                self.interrupt_event.wait(timeout=1.0)
-                self.interrupt_event.clear()
-                continue
+                playback_state = mirror.get('playback_state', 'playing')
+                if playback_state == 'paused':
+                    self.interrupt_event.wait(timeout=1.0)
+                    self.interrupt_event.clear()
+                    continue
 
-            contents = self.get_active_contents(mirror)
-            if not contents:
-                self.broadcast('standby', {
-                    'mirror_id': str(self.mirror_id),
-                    'mirror_name': mirror.get('mirror_name', ''),
-                    'message': 'No media assigned to this mirror'
+                contents = self.get_active_contents(mirror)
+                if not contents:
+                    self.broadcast('standby', {
+                        'mirror_id': str(self.mirror_id),
+                        'mirror_name': mirror.get('mirror_name', ''),
+                        'message': 'No media assigned to this mirror'
+                    })
+                    self.interrupt_event.wait(timeout=5.0)
+                    self.interrupt_event.clear()
+                    continue
+
+                if self.current_index >= len(contents):
+                    self.current_index = 0
+
+                current_item = contents[self.current_index]
+                photo_duration = mirror.get('photo_duration', 5)
+                content_durations = mirror.get('content_durations', {})
+                cid = str(current_item.get('_id'))
+
+                item_duration = int(content_durations.get(cid, current_item.get('duration') or photo_duration or 5))
+                item_duration = max(2, item_duration)
+
+                now = time.time()
+                mirror_collection.update_one(
+                    {'_id': self.mirror_id},
+                    {'$set': {
+                        'active_content_id': cid,
+                        'active_content_index': self.current_index,
+                        'sync_timestamp': now,
+                        'last_active_timestamp': now
+                    }}
+                )
+
+                # Broadcast slide_change trigger to all connected mirror displays simultaneously
+                self.broadcast('slide_change', {
+                    'index': self.current_index,
+                    'content_id': cid,
+                    'content_url': current_item.get('content_url'),
+                    'content_format': current_item.get('content_format'),
+                    'duration': item_duration,
+                    'timestamp': now
                 })
-                self.interrupt_event.wait(timeout=5.0)
-                self.interrupt_event.clear()
-                continue
 
-            if self.current_index >= len(contents):
-                self.current_index = 0
+                # Sleep for the duration of the current slide, or interrupt if an admin pauses/edits
+                interrupted = self.interrupt_event.wait(timeout=item_duration)
+                if interrupted:
+                    self.interrupt_event.clear()
+                    continue
 
-            current_item = contents[self.current_index]
-            photo_duration = mirror.get('photo_duration', 5)
-            content_durations = mirror.get('content_durations', {})
-            cid = str(current_item.get('_id'))
+                # Move to next slide
+                self.current_index = (self.current_index + 1) % len(contents)
 
-            item_duration = int(content_durations.get(cid, current_item.get('duration') or photo_duration or 5))
-            item_duration = max(2, item_duration)
-
-            now = time.time()
-            mirror_collection.update_one(
-                {'_id': self.mirror_id},
-                {'$set': {
-                    'active_content_id': cid,
-                    'active_content_index': self.current_index,
-                    'sync_timestamp': now,
-                    'last_active_timestamp': now
-                }}
-            )
-
-            # Broadcast slide_change trigger to all connected mirror displays simultaneously
-            self.broadcast('slide_change', {
-                'index': self.current_index,
-                'content_id': cid,
-                'content_url': current_item.get('content_url'),
-                'content_format': current_item.get('content_format'),
-                'duration': item_duration,
-                'timestamp': now
-            })
-
-            # Sleep for the duration of the current slide, or interrupt if an admin pauses/edits
-            interrupted = self.interrupt_event.wait(timeout=item_duration)
-            if interrupted:
-                self.interrupt_event.clear()
-                continue
-
-            # Move to next slide
-            self.current_index = (self.current_index + 1) % len(contents)
+            except Exception as e:
+                print(f"[Conductor Loop Error]: {e}")
+                time.sleep(2.0)
 
         with self.lock:
             self.is_running = False

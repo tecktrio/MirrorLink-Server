@@ -1374,18 +1374,21 @@ class MirrorStreamView(View):
             try:
                 # 1. Send initial state immediately so the viewer displays media without waiting
                 initial_state = conductor.get_initial_state(mirror)
-                yield f"event: init\ndata: {json.dumps(initial_state)}\n\n"
+                yield f"event: init\ndata: {json.dumps(initial_state, default=str)}\n\n"
 
                 # 2. Stream synchronized slide triggers pushed by the server conductor
                 while True:
                     try:
-                        msg = client_queue.get(timeout=20)
-                        yield f"event: {msg['event']}\ndata: {json.dumps(msg['data'])}\n\n"
+                        msg = client_queue.get(timeout=15)
+                        yield f"event: {msg['event']}\ndata: {json.dumps(msg['data'], default=str)}\n\n"
                     except queue.Empty:
                         # Periodic keepalive comment to keep connection alive through Nginx & proxies
                         yield ": keepalive\n\n"
-            except (GeneratorExit, Exception):
+            except GeneratorExit:
                 pass
+            except Exception as e:
+                import traceback
+                print(f"[SSE Stream Error]: {traceback.format_exc()}")
             finally:
                 conductor.remove_listener(client_queue)
 
