@@ -198,3 +198,4 @@ def notify_mirror_updated(mirror_id):
         conductor = CONDUCTORS.get(mid_str)
         if conductor:
             conductor.notify_state_change()
+
