@@ -1,6 +1,9 @@
 import base64
 import os
 import time
+import json
+import queue
+import asyncio
 from bson import ObjectId
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -1370,21 +1373,21 @@ class MirrorStreamView(View):
         client_queue = queue.Queue(maxsize=100)
         conductor.add_listener(client_queue)
 
-        def event_stream():
+        async def event_stream():
             try:
                 # 1. Send initial state immediately so the viewer displays media without waiting
-                initial_state = conductor.get_initial_state(mirror)
+                initial_state = await asyncio.to_thread(conductor.get_initial_state, mirror)
                 yield f"event: init\ndata: {json.dumps(initial_state, default=str)}\n\n"
 
                 # 2. Stream synchronized slide triggers pushed by the server conductor
                 while True:
                     try:
-                        msg = client_queue.get(timeout=15)
+                        msg = await asyncio.to_thread(client_queue.get, timeout=15)
                         yield f"event: {msg['event']}\ndata: {json.dumps(msg['data'], default=str)}\n\n"
                     except queue.Empty:
                         # Periodic keepalive comment to keep connection alive through Nginx & proxies
                         yield ": keepalive\n\n"
-            except GeneratorExit:
+            except (GeneratorExit, asyncio.CancelledError):
                 pass
             except Exception as e:
                 import traceback
