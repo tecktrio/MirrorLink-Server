@@ -246,8 +246,8 @@ def render_custom_menu_svg(menu, template, width, height):
                 parts.append(f"<image href='{esc(src)}' x='{x}' y='{y}' width='{w}' height='{h}' preserveAspectRatio='{fit}'/>")
         else:
             text = str(value.get('text') or block.get('text') or '')
-            try: size = max(8, min(120, int(block.get('font_size', 24)))) * height / 100
-            except (ValueError, TypeError): size = max(8, min(120, 24)) * height / 100
+            try: size = max(8, min(120, int(block.get('font_size', 24))))
+            except (ValueError, TypeError): size = 24
             font = block.get('font_family') if block.get('font_family') in ('Arial', 'Georgia', 'Verdana', 'Tahoma') else 'Arial'
             color = str(block.get('color') or '#171717')
             if not re.fullmatch(r'#[0-9a-fA-F]{6}', color): color = '#171717'
@@ -298,6 +298,13 @@ def store_menu_artwork(menu, template, administrator_id, menu_id):
         if 'temp_path' in locals():
             try: os.unlink(temp_path)
             except OSError: pass
+
+
+def menu_template_for(menu):
+    template_id = menu.get('template_id')
+    try: template_id = ObjectId(template_id) if isinstance(template_id, str) and len(template_id) == 24 else template_id
+    except Exception: pass
+    return menu_templates_collection.find_one({'_id': template_id})
 
 
 def render_menu_html(menu, template):
@@ -497,6 +504,12 @@ class Administrator(APIView):
                 item = dict(item)
                 item.setdefault('is_active', True)
                 item.setdefault('mirror_ids', [])
+                if not item.get('image_url'):
+                    template = menu_template_for(item)
+                    if template:
+                        item['image_url'] = store_menu_artwork(item, template, administrator['_id'], item['_id'])
+                        if item['image_url']:
+                            menus_collection.update_one({'_id': item['_id']}, {'$set': {'image_url': item['image_url']}})
                 menus.append(serialize_doc(item))
             return Response({'status_code': 200, 'data': menus})
 
@@ -531,12 +544,13 @@ class Administrator(APIView):
                 'is_active': {'$ne': False},
                 'mirror_ids': {'$in': [mirror_id, mirror['_id']]},
             }).sort('updated_at', -1):
-                tid = menu.get('template_id')
-                try: tid = ObjectId(tid) if isinstance(tid, str) and len(tid) == 24 else tid
-                except Exception: pass
-                template = menu_templates_collection.find_one({'_id': tid})
+                template = menu_template_for(menu)
                 if not template:
                     continue
+                if not menu.get('image_url'):
+                    menu['image_url'] = store_menu_artwork(menu, template, admin_id, menu['_id'])
+                    if menu.get('image_url'):
+                        menus_collection.update_one({'_id': menu['_id']}, {'$set': {'image_url': menu['image_url']}})
                 public_menus.append({'_id': str(menu['_id']), 'title': menu.get('title', 'Menu'), 'image_url': menu.get('image_url'),
                                      'html': render_menu_html(menu, template), 'layout': template.get('layout', 'classic'),
                                      'custom_layout': bool(template.get('custom_layout')), 'orientation': template.get('canvas_orientation', 'portrait'),
