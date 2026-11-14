@@ -6,7 +6,7 @@ import os
 import socket
 from urllib.parse import urlparse
 from bson.objectid import ObjectId
-from app.models import mirror_collection, content_collection
+from app.models import administrators_collection, mirror_collection, content_collection
 
 
 class MirrorConductor:
@@ -42,6 +42,24 @@ class MirrorConductor:
 
     def publish(self, event_type, data, retain=False):
         """Publish a JSON event to every display subscribed to this mirror."""
+        # Check eligibility at the publish boundary so every MQTT event path,
+        # including retained playback state, observes subscription changes.
+        try:
+            mirror = mirror_collection.find_one({'_id': self.mirror_id}, {'administrator_id': 1})
+            administrator_id = (mirror or {}).get('administrator_id')
+            owner = None
+            if administrator_id is not None:
+                owner = administrators_collection.find_one({'_id': administrator_id}, {'subscription': 1})
+                if owner is None:
+                    owner = administrators_collection.find_one({'_id': str(administrator_id)}, {'subscription': 1})
+        except Exception as exc:
+            print(f"[MQTT] Not publishing for mirror {self.mirror_id}: eligibility check failed: {exc}", flush=True)
+            return
+        subscription = (owner or {}).get('subscription', {})
+        if subscription.get('status') != 'active' or not subscription.get('plan_id'):
+            print(f"[MQTT] Not publishing for mirror {self.mirror_id}: account has no active subscription", flush=True)
+            return
+
         broker = os.environ.get('MQTT_BROKER_HOST')
         broker_url = os.environ.get('MQTT_BROKER_URL')
         parsed = None
