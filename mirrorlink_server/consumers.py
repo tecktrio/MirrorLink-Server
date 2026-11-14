@@ -439,6 +439,11 @@ class MirrorConsumer(AsyncWebsocketConsumer):
                         break
 
         if mirror:
+            owner = administrators_collection.find_one({'_id': mirror.get('administrator_id')})
+            subscription = (owner or {}).get('subscription', {})
+            if subscription.get('status') != 'active' or not subscription.get('plan_id'):
+                await self.close(code=4402)
+                return
             self.mirror = mirror
             current_time = time.time()
             filter_op = {'_id': self.mirror.get("_id")}

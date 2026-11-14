@@ -10,7 +10,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from bson import ObjectId
 from django.conf import settings
-from django.core.mail import send_mail
+from django.core.mail import EmailMultiAlternatives
 from django.contrib.auth.hashers import make_password, check_password
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -38,8 +38,20 @@ def send_email_otp(email, purpose):
     # Keep one current challenge per email and purpose.
     users_collection.update_one({'email_id': record['email_id']}, {'$set': {f'otp.{purpose}': record}}, upsert=True)
     try:
-        send_mail('Your MirrorLink verification code', f'Your verification code is {code}. It expires in 10 minutes.',
-                  getattr(settings, 'DEFAULT_FROM_EMAIL', None), [record['email_id']], fail_silently=False)
+        subject = 'Your MirrorLink verification code'
+        text_body = f'Your MirrorLink verification code is {code}. It expires in 10 minutes.'
+        html_body = f'''<!doctype html><html><body style="margin:0;background:#f5f5f5;color:#080808;font-family:Arial,Helvetica,sans-serif">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f5f5f5;padding:40px 16px"><tr><td align="center">
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:560px;background:#fff;border:1px solid #e8e8e8">
+              <tr><td style="padding:24px 30px;border-bottom:1px solid #eee"><span style="display:inline-block;width:30px;height:30px;line-height:30px;text-align:center;background:#080808;color:#fff;font-size:18px;font-weight:bold;border-radius:3px">M</span><span style="margin-left:10px;vertical-align:7px;font-size:18px;font-weight:bold;letter-spacing:-.5px">MirrorLink</span></td></tr>
+              <tr><td style="padding:36px 30px 12px"><div style="font-size:10px;font-weight:bold;letter-spacing:1.6px;color:#777">ACCOUNT VERIFICATION</div><h1 style="font-size:28px;line-height:1.15;letter-spacing:-1px;margin:14px 0 10px">Your code is ready.</h1><p style="font-size:14px;line-height:1.7;color:#666;margin:0">Enter this verification code to continue with your MirrorLink account.</p></td></tr>
+              <tr><td style="padding:14px 30px 26px"><div style="background:#f5f5f5;padding:20px;text-align:center;font-size:32px;font-weight:bold;letter-spacing:9px">{code}</div><p style="font-size:12px;line-height:1.6;color:#777;margin:16px 0 0">This code expires in 10 minutes. If you did not request it, you can ignore this email.</p></td></tr>
+              <tr><td style="padding:18px 30px;border-top:1px solid #eee;font-size:10px;color:#888">MirrorLink · Wireless display management</td></tr>
+            </table>
+          </td></tr></table></body></html>'''
+        message = EmailMultiAlternatives(subject, text_body, getattr(settings, 'DEFAULT_FROM_EMAIL', None), [record['email_id']])
+        message.attach_alternative(html_body, 'text/html')
+        message.send(fail_silently=False)
     except Exception:
         users_collection.update_one({'email_id': record['email_id']}, {'$unset': {f'otp.{purpose}': ''}})
         raise
@@ -177,13 +189,6 @@ class Administrator(APIView):
                 return Response({'status_text': 'Please sign in.', 'status_code': 401}, status=401)
             return Response({'status_code': 200, 'plan_active': plan_is_active(user), 'subscription': user.get('subscription', {})})
 
-        elif service not in ('request_otp', 'reset_password', 'check_plan'):
-            user = get_administrator(request.data.get('login_key'))
-            if not user:
-                return Response({'status_text': 'Please sign in.', 'status_code': 401}, status=401)
-            if not plan_is_active(user):
-                return Response({'status_text': 'An active MirrorLink plan is required to use the control panel.', 'status_code': 402, 'plan_active': False}, status=402)
-            
         elif service == 'AddContent':      
             login_key = request.data.get('login_key')
             administrator = get_administrator(login_key)
@@ -1253,6 +1258,9 @@ class Mirror(APIView):
                     mirror = mirror_collection.find_one({'username': clean_u})
 
             if mirror:
+                owner = administrators_collection.find_one({'_id': mirror.get('administrator_id')})
+                if not plan_is_active(owner):
+                    return Response({'status_text': 'This mirror is in setup mode. Subscribe to activate live playback.', 'status_code': 402, 'plan_active': False}, status=402)
                 current_time = time.time()
                 mirror_collection.update_one(
                     {'_id': mirror.get('_id')},
@@ -1369,6 +1377,10 @@ class Mirror(APIView):
             
             if not mirror:
                 return Response({'status_text': 'Mirror not found. Check mirror name.', 'status_code': 404}, status=404)
+
+            owner = administrators_collection.find_one({'_id': mirror.get('administrator_id')})
+            if not plan_is_active(owner):
+                return Response({'status_text': 'This mirror is in setup mode. Subscribe to activate live playback.', 'status_code': 402, 'plan_active': False}, status=402)
             
             disabled_set = {str(d) for d in mirror.get('disabled_contents', [])}
             content_durations = mirror.get('content_durations', {})
@@ -1576,6 +1588,15 @@ class MirrorStreamView(View):
                 "event: error\ndata: " + json.dumps({'status_code': 404, 'status_text': 'Mirror not found'}) + "\n\n",
                 content_type="text/event-stream",
                 status=404
+            )
+            resp['Access-Control-Allow-Origin'] = '*'
+            return resp
+
+        owner = administrators_collection.find_one({'_id': mirror.get('administrator_id')})
+        if not plan_is_active(owner):
+            resp = HttpResponse(
+                "event: error\ndata: " + json.dumps({'status_code': 402, 'status_text': 'Subscribe to activate live playback.'}) + "\n\n",
+                content_type="text/event-stream", status=402
             )
             resp['Access-Control-Allow-Origin'] = '*'
             return resp
