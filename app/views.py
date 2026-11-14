@@ -8,6 +8,8 @@ import hashlib
 import secrets
 import re
 import html as html_lib
+import tempfile
+import uuid
 from datetime import datetime, timedelta, timezone
 from bson import ObjectId
 from django.conf import settings
@@ -153,6 +155,8 @@ def ensure_menu_templates():
 
 def render_menu_svg(menu, template, width=1920, height=1080):
     """Render saved menu HTML into a self-contained SVG image for cropping/import."""
+    if template.get('custom_layout'):
+        return render_custom_menu_svg(menu, template, width, height)
     data = menu.get('data', {})
     components = template.get('components', [])
     def field_value(key, default=''):
@@ -208,6 +212,92 @@ def render_menu_svg(menu, template, width=1920, height=1080):
            f"width='{width}' height='{height}' viewBox='0 0 {width} {height}'><foreignObject width='100%' height='100%'>{html_doc}</foreignObject></svg>")
     encoded = base64.b64encode(svg.encode('utf-8')).decode('ascii')
     return f'data:image/svg+xml;base64,{encoded}'
+
+
+def render_custom_menu_svg(menu, template, width, height):
+    """Render custom menu holders as native SVG so thumbnails and mobile browsers agree."""
+    data = menu.get('data', {}) if isinstance(menu.get('data'), dict) else {}
+    blocks = template.get('blocks', []) if isinstance(template.get('blocks'), list) else []
+    saved_blocks = data.get('blocks', []) if isinstance(data.get('blocks'), list) else []
+    saved_by_key = {str(block.get('holder_key')): block for block in saved_blocks if isinstance(block, dict) and block.get('holder_key')}
+    esc = lambda value: html_lib.escape(str(value or ''), quote=True)
+    def pct(value, default=0, minimum=0, maximum=100):
+        try: return max(minimum, min(maximum, float(value)))
+        except (TypeError, ValueError): return default
+    bg = str(data.get('background') or template.get('background') or '#ffffff')
+    if not re.fullmatch(r'#[0-9a-fA-F]{6}', bg): bg = '#ffffff'
+    bg_image = str(data.get('background_image') or template.get('background_image') or '').strip()
+    parts = [f"<rect width='{width}' height='{height}' fill='{bg}'/>"]
+    if bg_image.startswith(('https://', 'http://', 'data:image/')):
+        parts.append(f"<image href='{esc(bg_image)}' x='0' y='0' width='{width}' height='{height}' preserveAspectRatio='xMidYMid slice'/>")
+    def draw(block, value, index):
+        if not isinstance(block, dict): return
+        x, y = pct(block.get('x')), pct(block.get('y'))
+        w, h = pct(block.get('width', 20), 20, 1), pct(block.get('height', 15), 15, 1)
+        x, y, w, h = width*x/100, height*y/100, width*w/100, height*h/100
+        clip = f'holder-{index}'
+        parts.append(f"<defs><clipPath id='{clip}'><rect x='{x}' y='{y}' width='{w}' height='{h}'/></clipPath></defs>")
+        parts.append(f"<g clip-path='url(#{clip})'>")
+        value = value if isinstance(value, dict) else {}
+        if block.get('type') == 'image':
+            src = str(value.get('image_url') or '').strip()
+            if src.startswith(('https://', 'http://', 'data:image/')):
+                fit = 'xMidYMid meet' if block.get('crop') == 'contain' else 'xMidYMid slice'
+                parts.append(f"<image href='{esc(src)}' x='{x}' y='{y}' width='{w}' height='{h}' preserveAspectRatio='{fit}'/>")
+        else:
+            text = str(value.get('text') or block.get('text') or '')
+            try: size = max(8, min(120, int(block.get('font_size', 24)))) * height / 100
+            except (ValueError, TypeError): size = max(8, min(120, 24)) * height / 100
+            font = block.get('font_family') if block.get('font_family') in ('Arial', 'Georgia', 'Verdana', 'Tahoma') else 'Arial'
+            color = str(block.get('color') or '#171717')
+            if not re.fullmatch(r'#[0-9a-fA-F]{6}', color): color = '#171717'
+            lines = text.splitlines() or ['']
+            parts.append(f"<text x='{x}' y='{y + size}' fill='{color}' font-family='{font}' font-size='{size}' font-weight='{'700' if block.get('bold') else '400'}'>")
+            for line_i, line in enumerate(lines[:30]):
+                parts.append(f"<tspan x='{x}' dy='{'0' if line_i == 0 else size * 1.2}'>{esc(line)}</tspan>")
+            parts.append('</text>')
+        parts.append('</g>')
+    index = 0
+    for i, block in enumerate(blocks[:80]):
+        if not isinstance(block, dict) or block.get('scope') == 'item': continue
+        key = str(block.get('holder_key') or '')
+        draw(block, saved_by_key.get(key, saved_blocks[i] if i < len(saved_blocks) and isinstance(saved_blocks[i], dict) else block), index)
+        index += 1
+    item_blocks = [block for block in blocks if isinstance(block, dict) and block.get('scope') == 'item']
+    items = data.get('items', []) if isinstance(data.get('items'), list) else []
+    assignments = data.get('item_assignments') if isinstance(data.get('item_assignments'), list) else template.get('item_assignments', [])
+    try: count = max(1, min(30, int(template.get('item_count', 1))))
+    except (TypeError, ValueError): count = 1
+    for item_i in range(count):
+        item = items[item_i] if item_i < len(items) and isinstance(items[item_i], dict) else {}
+        assigned = set(assignments[item_i]) if item_i < len(assignments) and isinstance(assignments[item_i], list) else {str(b.get('holder_key') or '') for b in item_blocks}
+        for block in item_blocks:
+            if str(block.get('holder_key') or '') in assigned:
+                draw(block, item.get(str(block.get('holder_key') or ''), {}), index)
+                index += 1
+    svg = f"<svg xmlns='http://www.w3.org/2000/svg' width='{width}' height='{height}' viewBox='0 0 {width} {height}'>{''.join(parts)}</svg>"
+    return 'data:image/svg+xml;base64,' + base64.b64encode(svg.encode()).decode('ascii')
+
+
+def store_menu_artwork(menu, template, administrator_id, menu_id):
+    """Upload a fresh SVG artwork object and return its public URL."""
+    orientation = template.get('canvas_orientation', 'portrait')
+    width, height = (1200, 1920) if orientation == 'portrait' else (1920, 1200)
+    preview = render_menu_svg(menu, template, width, height)
+    try:
+        svg_bytes = base64.b64decode(preview.split(',', 1)[1])
+        with tempfile.NamedTemporaryFile(suffix='.svg', delete=False) as temp:
+            temp.write(svg_bytes)
+            temp_path = temp.name
+        key = f"menus/{administrator_id}/{menu_id}/{uuid.uuid4().hex}.svg"
+        return upload_file_to_s3(temp_path, object_name=key, content_type='image/svg+xml') or preview
+    except Exception as exc:
+        print(f"[Menu artwork] Could not store artwork: {exc}")
+        return None
+    finally:
+        if 'temp_path' in locals():
+            try: os.unlink(temp_path)
+            except OSError: pass
 
 
 def render_menu_html(menu, template):
@@ -447,7 +537,7 @@ class Administrator(APIView):
                 template = menu_templates_collection.find_one({'_id': tid})
                 if not template:
                     continue
-                public_menus.append({'_id': str(menu['_id']), 'title': menu.get('title', 'Menu'),
+                public_menus.append({'_id': str(menu['_id']), 'title': menu.get('title', 'Menu'), 'image_url': menu.get('image_url'),
                                      'html': render_menu_html(menu, template), 'layout': template.get('layout', 'classic'),
                                      'custom_layout': bool(template.get('custom_layout')), 'orientation': template.get('canvas_orientation', 'portrait'),
                                      'background': menu.get('data', {}).get('background') if re.fullmatch(r'#[0-9a-fA-F]{6}', str(menu.get('data', {}).get('background', ''))) else template.get('background', '#fff'),
@@ -572,19 +662,33 @@ class Administrator(APIView):
                     object_id = ObjectId(menu_id)
                 except Exception:
                     return Response({'status_code': 400, 'status_text': 'Invalid menu id.'}, status=400)
+                existing_menu = menus_collection.find_one({'_id': object_id, 'administrator_id': administrator['_id']})
+                if not existing_menu:
+                    return Response({'status_code': 404, 'status_text': 'Menu not found.'}, status=404)
+                saved_id = object_id
+                old_image_url = existing_menu.get('image_url')
+            else:
+                saved_id = ObjectId()
+                old_image_url = None
+            new_image_url = store_menu_artwork({'_id': saved_id, 'title': menu_title, 'data': menu_data}, template, administrator['_id'], saved_id)
+            if not new_image_url:
+                return Response({'status_code': 503, 'status_text': 'Could not generate menu artwork.'}, status=503)
+            if menu_id:
                 result = menus_collection.update_one(
                     {'_id': object_id, 'administrator_id': administrator['_id']},
-                    {'$set': {'template_id': template_id, 'title': menu_title, 'data': menu_data, 'updated_at': now}, '$setOnInsert': {'is_active': True, 'mirror_ids': []}}
+                    {'$set': {'template_id': template_id, 'title': menu_title, 'data': menu_data, 'image_url': new_image_url, 'updated_at': now}}
                 )
                 if not result.matched_count:
                     return Response({'status_code': 404, 'status_text': 'Menu not found.'}, status=404)
-                saved_id = object_id
+                if old_image_url and old_image_url != new_image_url and isinstance(old_image_url, str) and f'/menus/{administrator["_id"]}/{saved_id}/' in old_image_url:
+                    delete_file_from_s3(old_image_url)
             else:
-                saved_id = menus_collection.insert_one({
+                menus_collection.insert_one({
+                    '_id': saved_id,
                     'administrator_id': administrator['_id'], 'template_id': template_id,
-                    'title': menu_title, 'data': menu_data, 'is_active': True, 'mirror_ids': [], 'created_at': now, 'updated_at': now,
-                }).inserted_id
-            return Response({'status_code': 200, 'menu_id': str(saved_id), 'status_text': 'Menu saved.'})
+                    'title': menu_title, 'data': menu_data, 'image_url': new_image_url, 'is_active': True, 'mirror_ids': [], 'created_at': now, 'updated_at': now,
+                })
+            return Response({'status_code': 200, 'menu_id': str(saved_id), 'image_url': new_image_url, 'status_text': 'Menu saved.'})
 
         elif service == 'DeleteMenu':
             administrator = get_administrator(request.data.get('login_key'))
@@ -635,7 +739,7 @@ class Administrator(APIView):
                 width, height = 1920, 1080
             return Response({
                 'status_code': 200,
-                'preview_url': render_menu_svg(menu, template, width, height),
+                'preview_url': menu.get('image_url') or render_menu_svg(menu, template, width, height),
                 'width': width, 'height': height,
             })
 
