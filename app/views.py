@@ -207,6 +207,30 @@ def render_menu_svg(menu, template, width=1920, height=1080):
     return f'data:image/svg+xml;base64,{encoded}'
 
 
+def render_menu_html(menu, template):
+    data = menu.get('data', {})
+    def text(key, default=''):
+        component = next((item for item in template.get('components', []) if item.get('key') == key), {})
+        return html_lib.escape(str(data.get(key, component.get('default', default)) or ''), quote=True)
+    items_html = []
+    for item in data.get('items', []) if isinstance(data.get('items'), list) else []:
+        if not isinstance(item, dict):
+            continue
+        image_url = str(item.get('image_url', '')).strip()
+        image_html = ''
+        if image_url.startswith(('https://', 'http://', 'data:image/')):
+            image_html = f"<img src='{html_lib.escape(image_url, quote=True)}' alt='' />"
+        items_html.append(
+            f"<article>{image_html}<div class='item-copy'><strong>{html_lib.escape(str(item.get('name', '')), quote=True)}</strong>"
+            f"<span class='price'>{html_lib.escape(str(item.get('price', '')), quote=True)}</span>"
+            f"<p>{html_lib.escape(str(item.get('description', '')), quote=True)}</p></div></article>"
+        )
+    rendered = template.get('html_template', MENU_TEMPLATE_SEEDS[0]['html_template'])
+    for key in ('eyebrow', 'title', 'subtitle', 'footer'):
+        rendered = rendered.replace('{{' + key + '}}', text(key, menu.get('title', '')))
+    return rendered.replace('{{items}}', ''.join(items_html))
+
+
 class Administrator(APIView):
     
     def post(self, request):
@@ -318,8 +342,87 @@ class Administrator(APIView):
             administrator = get_administrator(request.data.get('login_key'))
             if not administrator:
                 return Response({'status_code': 401, 'status_text': 'Please sign in.'}, status=401)
-            menus = [serialize_doc(dict(item)) for item in menus_collection.find({'administrator_id': administrator['_id']}).sort('updated_at', -1)]
+            menus = []
+            for item in menus_collection.find({'administrator_id': administrator['_id']}).sort('updated_at', -1):
+                item = dict(item)
+                item.setdefault('is_active', True)
+                item.setdefault('mirror_ids', [])
+                menus.append(serialize_doc(item))
             return Response({'status_code': 200, 'data': menus})
+
+        elif service == 'GetMenuShareLink':
+            administrator = get_administrator(request.data.get('login_key'))
+            mirror_id = request.data.get('mirror_id')
+            try:
+                mirror_object_id = ObjectId(mirror_id)
+            except Exception:
+                return Response({'status_code': 400, 'status_text': 'Select a valid mirror.'}, status=400)
+            owner_id = administrator.get('_id') if administrator else None
+            mirror = mirror_collection.find_one({'_id': mirror_object_id, 'administrator_id': owner_id}) if owner_id else None
+            if not mirror:
+                return Response({'status_code': 404, 'status_text': 'Mirror not found.'}, status=404)
+            token = mirror.get('menu_share_token')
+            if not token:
+                token = secrets.token_urlsafe(24)
+                mirror_collection.update_one({'_id': mirror['_id']}, {'$set': {'menu_share_token': token}})
+            return Response({'status_code': 200, 'share_token': token, 'mirror_name': mirror.get('mirror_name', 'Menu')})
+
+        elif service == 'GetPublicMirrorMenus':
+            token = str(request.data.get('share_token') or '')
+            mirror = mirror_collection.find_one({'menu_share_token': token}) if token else None
+            if not mirror:
+                return Response({'status_code': 404, 'status_text': 'This menu QR is unavailable.'}, status=404)
+            mirror_id = str(mirror['_id'])
+            admin_id = mirror.get('administrator_id')
+            public_menus = []
+            ensure_menu_templates()
+            for menu in menus_collection.find({
+                'administrator_id': admin_id,
+                'is_active': {'$ne': False},
+                'mirror_ids': {'$in': [mirror_id, mirror['_id']]},
+            }).sort('updated_at', -1):
+                template = menu_templates_collection.find_one({'_id': menu.get('template_id')})
+                if not template:
+                    continue
+                public_menus.append({'_id': str(menu['_id']), 'title': menu.get('title', 'Menu'),
+                                     'html': render_menu_html(menu, template), 'layout': template.get('layout', 'classic'),
+                                     'background': menu.get('data', {}).get('background') if re.fullmatch(r'#[0-9a-fA-F]{6}', str(menu.get('data', {}).get('background', ''))) else template.get('background', '#fff'),
+                                     'accent': menu.get('data', {}).get('accent') if re.fullmatch(r'#[0-9a-fA-F]{6}', str(menu.get('data', {}).get('accent', ''))) else template.get('accent', '#111')})
+            return Response({'status_code': 200, 'mirror_name': mirror.get('mirror_name', 'Menu'), 'data': public_menus})
+
+        elif service == 'SetMenuMirrors':
+            administrator = get_administrator(request.data.get('login_key'))
+            if not administrator:
+                return Response({'status_code': 401, 'status_text': 'Please sign in.'}, status=401)
+            try:
+                menu_id = ObjectId(request.data.get('menu_id'))
+                mirror_id = ObjectId(request.data.get('mirror_id'))
+            except Exception:
+                return Response({'status_code': 400, 'status_text': 'Select a valid menu and mirror.'}, status=400)
+            menu = menus_collection.find_one({'_id': menu_id, 'administrator_id': administrator['_id']})
+            mirror = mirror_collection.find_one({'_id': mirror_id, 'administrator_id': administrator['_id']})
+            if not menu or not mirror:
+                return Response({'status_code': 404, 'status_text': 'Menu or mirror not found.'}, status=404)
+            ids = [str(value) for value in menu.get('mirror_ids', [])]
+            if request.data.get('assigned') and str(mirror_id) not in ids:
+                ids.append(str(mirror_id))
+            elif not request.data.get('assigned'):
+                ids = [value for value in ids if value != str(mirror_id)]
+            menus_collection.update_one({'_id': menu_id}, {'$set': {'mirror_ids': ids, 'updated_at': datetime.now(timezone.utc)}})
+            return Response({'status_code': 200, 'mirror_ids': ids})
+
+        elif service == 'SetMenuActive':
+            administrator = get_administrator(request.data.get('login_key'))
+            if not administrator:
+                return Response({'status_code': 401, 'status_text': 'Please sign in.'}, status=401)
+            try:
+                menu_id = ObjectId(request.data.get('menu_id'))
+            except Exception:
+                return Response({'status_code': 400, 'status_text': 'Invalid menu id.'}, status=400)
+            result = menus_collection.update_one({'_id': menu_id, 'administrator_id': administrator['_id']}, {'$set': {'is_active': bool(request.data.get('is_active')), 'updated_at': datetime.now(timezone.utc)}})
+            if not result.matched_count:
+                return Response({'status_code': 404, 'status_text': 'Menu not found.'}, status=404)
+            return Response({'status_code': 200, 'is_active': bool(request.data.get('is_active'))})
 
         elif service == 'SaveMenu':
             administrator = get_administrator(request.data.get('login_key'))
@@ -343,7 +446,7 @@ class Administrator(APIView):
                     return Response({'status_code': 400, 'status_text': 'Invalid menu id.'}, status=400)
                 result = menus_collection.update_one(
                     {'_id': object_id, 'administrator_id': administrator['_id']},
-                    {'$set': {'template_id': template_id, 'title': menu_title, 'data': menu_data, 'updated_at': now}}
+                    {'$set': {'template_id': template_id, 'title': menu_title, 'data': menu_data, 'updated_at': now}, '$setOnInsert': {'is_active': True, 'mirror_ids': []}}
                 )
                 if not result.matched_count:
                     return Response({'status_code': 404, 'status_text': 'Menu not found.'}, status=404)
@@ -351,7 +454,7 @@ class Administrator(APIView):
             else:
                 saved_id = menus_collection.insert_one({
                     'administrator_id': administrator['_id'], 'template_id': template_id,
-                    'title': menu_title, 'data': menu_data, 'created_at': now, 'updated_at': now,
+                    'title': menu_title, 'data': menu_data, 'is_active': True, 'mirror_ids': [], 'created_at': now, 'updated_at': now,
                 }).inserted_id
             return Response({'status_code': 200, 'menu_id': str(saved_id), 'status_text': 'Menu saved.'})
 
