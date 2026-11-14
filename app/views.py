@@ -251,33 +251,22 @@ def render_menu_html(menu, template):
         item_values = data.get('items', []) if isinstance(data.get('items'), list) else []
         try: count = max(1, min(30, int(template.get('item_count', 1))))
         except (ValueError, TypeError): count = 1
-        area = template.get('item_area', {}) if isinstance(template.get('item_area'), dict) else {}
-        ax, ay = max(0, min(100, float(area.get('x', 5)))), max(0, min(100, float(area.get('y', 34))))
-        aw, ah = max(1, min(100, float(area.get('width', 90)))), max(1, min(100, float(area.get('height', 60))))
-        try: columns = max(1, min(3, int(area.get('columns', 2))))
-        except (ValueError, TypeError): columns = 2
         assignments = data.get('item_assignments') if isinstance(data.get('item_assignments'), list) else template.get('item_assignments', [])
-        rows = (count + columns - 1) // columns
-        cell_w, cell_h = aw / columns, ah / rows
         for item_index in range(count):
             item = item_values[item_index] if item_index < len(item_values) and isinstance(item_values[item_index], dict) else {}
             assigned_keys = set(assignments[item_index]) if item_index < len(assignments) and isinstance(assignments[item_index], list) else {str(block.get('holder_key') or '') for block in item_blocks}
-            col, row = item_index % columns, item_index // columns
-            card_style = f'position:absolute;left:{ax + col*cell_w}%;top:{ay + row*cell_h}%;width:{cell_w}%;height:{cell_h}%;overflow:hidden;'
-            pieces.append(f"<div style='{card_style}'>")
             for block in item_blocks:
                 if str(block.get('holder_key') or '') not in assigned_keys:
                     continue
                 pieces.append(block_html(block, item.get(str(block.get('holder_key') or ''), {}), 0, 0, 100, 100))
-            pieces.append('</div>')
 
         bg = str(data.get('background', template.get('background', '#fff')))
         if not re.fullmatch(r'#[0-9a-fA-F]{6}', bg): bg = '#ffffff'
-        bg_image = str(data.get('background_image', template.get('background_image', ''))).strip()
+        bg_image = str(data.get('background_image') or template.get('background_image', '')).strip()
         bg_style = f'background:{bg};'
         if bg_image.startswith(('https://', 'http://', 'data:image/')):
             bg_style += f"background-image:url('{html_lib.escape(bg_image, quote=True)}');background-size:cover;background-position:center;"
-        return f"<div style='position:relative;width:100%;height:100%;min-height:100vh;overflow:hidden;{bg_style}'>{''.join(pieces)}</div>"
+        return f"<div style='position:relative;width:100%;height:100%;min-height:100%;overflow:hidden;{bg_style}'>{''.join(pieces)}</div>"
     def text(key, default=''):
         component = next((item for item in template.get('components', []) if item.get('key') == key), {})
         return html_lib.escape(str(data.get(key, component.get('default', default)) or ''), quote=True)
@@ -460,6 +449,7 @@ class Administrator(APIView):
                     continue
                 public_menus.append({'_id': str(menu['_id']), 'title': menu.get('title', 'Menu'),
                                      'html': render_menu_html(menu, template), 'layout': template.get('layout', 'classic'),
+                                     'custom_layout': bool(template.get('custom_layout')), 'orientation': template.get('canvas_orientation', 'portrait'),
                                      'background': menu.get('data', {}).get('background') if re.fullmatch(r'#[0-9a-fA-F]{6}', str(menu.get('data', {}).get('background', ''))) else template.get('background', '#fff'),
                                      'accent': menu.get('data', {}).get('accent') if re.fullmatch(r'#[0-9a-fA-F]{6}', str(menu.get('data', {}).get('accent', ''))) else template.get('accent', '#111')})
             return Response({'status_code': 200, 'mirror_name': mirror.get('mirror_name', 'Menu'), 'data': public_menus})
@@ -523,7 +513,8 @@ class Administrator(APIView):
             valid_holder_keys = {str(block.get('holder_key')) for block in blocks if block.get('scope') == 'item' and block.get('holder_key')}
             raw_assignments = payload.get('item_assignments') if isinstance(payload.get('item_assignments'), list) else []
             item_assignments = [[str(key) for key in raw_assignments[i] if str(key) in valid_holder_keys] if i < len(raw_assignments) and isinstance(raw_assignments[i], list) else [] for i in range(item_count)]
-            template_doc = {'name': name, 'description': 'Custom menu layout', 'background': payload.get('background', '#ffffff'), 'background_image': payload.get('background_image', ''), 'custom_layout': True, 'layout': 'custom', 'blocks': blocks, 'item_count': item_count, 'item_area': item_area, 'item_assignments': item_assignments, 'components': [], 'administrator_id': administrator['_id'], 'updated_at': datetime.now(timezone.utc)}
+            orientation = payload.get('canvas_orientation') if payload.get('canvas_orientation') in ('portrait', 'landscape') else 'landscape'
+            template_doc = {'name': name, 'description': 'Custom menu layout', 'background': payload.get('background', '#ffffff'), 'background_image': payload.get('background_image', ''), 'custom_layout': True, 'layout': 'custom', 'canvas_orientation': orientation, 'blocks': blocks, 'item_count': item_count, 'item_area': item_area, 'item_assignments': item_assignments, 'components': [], 'administrator_id': administrator['_id'], 'updated_at': datetime.now(timezone.utc)}
             template_id = payload.get('_id')
             if template_id:
                 try:
