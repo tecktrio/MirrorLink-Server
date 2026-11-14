@@ -228,9 +228,12 @@ def render_custom_menu_svg(menu, template, width, height):
     def pct(value, default=0, minimum=0, maximum=100):
         try: return max(minimum, min(maximum, float(value)))
         except (TypeError, ValueError): return default
+    embedded_images = {}
     def inline_image(src):
         if src.startswith('data:image/'):
             return src
+        if src in embedded_images:
+            return embedded_images[src]
         try:
             parsed = urllib.parse.urlparse(src)
             if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password:
@@ -247,9 +250,10 @@ def render_custom_menu_svg(menu, template, width, height):
             chunks, total = [], 0
             for chunk in response.iter_content(64 * 1024):
                 total += len(chunk)
-                if total > 8 * 1024 * 1024: return ''
+                if total > 2 * 1024 * 1024: return ''
                 chunks.append(chunk)
-            return f"data:{mime};base64,{base64.b64encode(b''.join(chunks)).decode('ascii')}"
+            embedded_images[src] = f"data:{mime};base64,{base64.b64encode(b''.join(chunks)).decode('ascii')}"
+            return embedded_images[src]
         except Exception:
             return ''
     bg = str(data.get('background') or template.get('background') or '#ffffff')
@@ -337,6 +341,12 @@ def menu_template_for(menu):
     try: template_id = ObjectId(template_id) if isinstance(template_id, str) and len(template_id) == 24 else template_id
     except Exception: pass
     return menu_templates_collection.find_one({'_id': template_id})
+
+
+def cleanup_previous_menu_artwork(url, administrator_id, menu_id, new_url=None):
+    if (url and url != new_url and isinstance(url, str)
+            and f'/menus/{administrator_id}/{menu_id}/' in url):
+        delete_file_from_s3(url)
 
 
 def render_menu_html(menu, template):
@@ -537,6 +547,7 @@ class Administrator(APIView):
                 item.setdefault('is_active', True)
                 item.setdefault('mirror_ids', [])
                 if not item.get('image_data'):
+                    old_image_url = item.get('artwork_s3_url') or item.get('image_url')
                     template = menu_template_for(item)
                     if template:
                         artwork = store_menu_artwork(item, template, administrator['_id'], item['_id'])
@@ -545,6 +556,7 @@ class Administrator(APIView):
                             item['artwork_s3_url'] = artwork['url']
                             item['image_url'] = artwork['data']
                             menus_collection.update_one({'_id': item['_id']}, {'$set': {'image_data': artwork['data'], 'image_url': artwork['data'], 'artwork_s3_url': artwork['url']}})
+                            cleanup_previous_menu_artwork(old_image_url, administrator['_id'], item['_id'], artwork['url'])
                 menus.append(serialize_doc(item))
             return Response({'status_code': 200, 'data': menus})
 
@@ -583,12 +595,14 @@ class Administrator(APIView):
                 if not template:
                     continue
                 if not menu.get('image_data'):
+                    old_image_url = menu.get('artwork_s3_url') or menu.get('image_url')
                     artwork = store_menu_artwork(menu, template, admin_id, menu['_id'])
                     if artwork:
                         menu['image_data'] = artwork['data']
                         menu['image_url'] = artwork['data']
                         menu['artwork_s3_url'] = artwork['url']
                         menus_collection.update_one({'_id': menu['_id']}, {'$set': {'image_data': artwork['data'], 'image_url': artwork['data'], 'artwork_s3_url': artwork['url']}})
+                        cleanup_previous_menu_artwork(old_image_url, admin_id, menu['_id'], artwork['url'])
                 public_menus.append({'_id': str(menu['_id']), 'title': menu.get('title', 'Menu'), 'image_url': menu.get('image_data') or menu.get('image_url'),
                                      'html': render_menu_html(menu, template), 'layout': template.get('layout', 'classic'),
                                      'custom_layout': bool(template.get('custom_layout')), 'orientation': template.get('canvas_orientation', 'portrait'),
@@ -718,7 +732,7 @@ class Administrator(APIView):
                 if not existing_menu:
                     return Response({'status_code': 404, 'status_text': 'Menu not found.'}, status=404)
                 saved_id = object_id
-                old_image_url = existing_menu.get('artwork_s3_url')
+                old_image_url = existing_menu.get('artwork_s3_url') or existing_menu.get('image_url')
             else:
                 saved_id = ObjectId()
                 old_image_url = None
@@ -733,8 +747,7 @@ class Administrator(APIView):
                 )
                 if not result.matched_count:
                     return Response({'status_code': 404, 'status_text': 'Menu not found.'}, status=404)
-                if old_image_url and old_image_url != artwork['url'] and isinstance(old_image_url, str) and f'/menus/{administrator["_id"]}/{saved_id}/' in old_image_url:
-                    delete_file_from_s3(old_image_url)
+                cleanup_previous_menu_artwork(old_image_url, administrator['_id'], saved_id, artwork['url'])
             else:
                 menus_collection.insert_one({
                     '_id': saved_id,
