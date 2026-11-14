@@ -11,6 +11,10 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load server secrets before settings below read environment values.
+load_dotenv(Path(__file__).resolve().parent.parent / '.env')
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -138,16 +142,21 @@ STATIC_URL = 'static/'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-# Email OTP delivery. Configure SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD,
-# SMTP_USE_TLS and DEFAULT_FROM_EMAIL in the server environment.
+# Email OTP delivery through Gmail SMTP with a Google App Password.
 import os
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
-EMAIL_HOST = os.environ.get('SMTP_HOST', '')
+EMAIL_HOST = os.environ.get('SMTP_HOST', 'smtp.gmail.com')
 EMAIL_PORT = int(os.environ.get('SMTP_PORT', '587'))
 EMAIL_HOST_USER = os.environ.get('SMTP_USER', '')
-EMAIL_HOST_PASSWORD = os.environ.get('SMTP_PASSWORD', '')
-EMAIL_USE_TLS = os.environ.get('SMTP_USE_TLS', 'true').lower() == 'true'
-DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', EMAIL_HOST_USER or 'noreply@mirrorlink.bigburry.com')
+EMAIL_HOST_PASSWORD = os.environ.get('SMTP_PASSWORD', os.environ.get('SMTP_PASS', ''))
+EMAIL_USE_SSL = os.environ.get('SMTP_USE_SSL', 'false').lower() == 'true'
+if os.environ.get('SMTP_SECURE', '').lower() == 'true':
+    EMAIL_USE_SSL = True
+EMAIL_USE_TLS = os.environ.get('SMTP_USE_TLS', str(not EMAIL_USE_SSL)).lower() == 'true'
+SMTP_FROM_EMAIL = os.environ.get('SMTP_FROM_EMAIL', '')
+SMTP_FROM_NAME = os.environ.get('SMTP_FROM_NAME', '').strip()
+SMTP_SENDER = f'{SMTP_FROM_NAME} <{SMTP_FROM_EMAIL}>' if SMTP_FROM_NAME and SMTP_FROM_EMAIL else (SMTP_FROM_EMAIL or EMAIL_HOST_USER)
+DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', SMTP_SENDER or 'noreply@mirrorlink.bigburry.com')
 
 # ==========================================
 # File & Data Upload Limits (Allow Videos up to 500MB)

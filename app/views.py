@@ -834,7 +834,6 @@ class Administrator(APIView):
                 return Response({'status_code': 400, 'status_text': 'Mirror Name is required.'}, status=400)
 
             # Mirror names must be unique across the system for direct streaming
-            import re
             existing_mirror = mirror_collection.find_one({
                 'mirror_name': {'$regex': f'^{re.escape(mirror_name)}$', '$options': 'i'}
             })
