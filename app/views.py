@@ -213,26 +213,64 @@ def render_menu_svg(menu, template, width=1920, height=1080):
 def render_menu_html(menu, template):
     data = menu.get('data', {})
     if template.get('custom_layout'):
-        blocks = data.get('blocks', template.get('blocks', []))
+        template_blocks = template.get('blocks', []) if isinstance(template.get('blocks'), list) else []
+        saved_blocks = data.get('blocks', []) if isinstance(data.get('blocks'), list) else []
+        saved_by_key = {str(block.get('holder_key')): block for block in saved_blocks if isinstance(block, dict) and block.get('holder_key')}
         pieces = []
-        for block in blocks[:80] if isinstance(blocks, list) else []:
-            if not isinstance(block, dict):
-                continue
-            x, y = max(0, min(100, float(block.get('x', 0) or 0))), max(0, min(100, float(block.get('y', 0) or 0)))
-            w, h = max(1, min(100, float(block.get('width', 20) or 20))), max(1, min(100, float(block.get('height', 15) or 15)))
-            style = f'left:{x}%;top:{y}%;width:{w}%;height:{h}%;position:absolute;overflow:hidden;'
+
+        def block_html(block, value_block, left, top, width, height):
+            x = max(0, min(100, float(block.get('x', 0) or 0)))
+            y = max(0, min(100, float(block.get('y', 0) or 0)))
+            w = max(1, min(100, float(block.get('width', 20) or 20)))
+            h = max(1, min(100, float(block.get('height', 15) or 15)))
+            style = f'left:{left + width*x/100}%;top:{top + height*y/100}%;width:{width*w/100}%;height:{height*h/100}%;position:absolute;overflow:hidden;'
+            value_block = value_block if isinstance(value_block, dict) else {}
             if block.get('type') == 'image':
-                src = str(block.get('image_url', '')).strip()
+                src = str(value_block.get('image_url', '')).strip()
                 if src.startswith(('https://', 'http://', 'data:image/')):
-                    pieces.append(f"<div style='{style}'><img src='{html_lib.escape(src, quote=True)}' style='width:100%;height:100%;object-fit:cover'/></div>")
-            else:
-                font = block.get('font_family') if block.get('font_family') in ('Arial', 'Georgia', 'Verdana', 'Tahoma') else 'Arial'
-                size = max(8, min(120, int(block.get('font_size', 24) or 24)))
-                weight = '700' if block.get('bold') else '400'
-                color = str(block.get('color', '#171717'))
-                if not re.fullmatch(r'#[0-9a-fA-F]{6}', color): color = '#171717'
-                value = html_lib.escape(str(block.get('text', '')), quote=True)
-                pieces.append(f"<div style='{style}font:{weight} {size}px {font};color:{color};white-space:pre-wrap'>{value}</div>")
+                    fit = 'contain' if block.get('crop') == 'contain' else 'cover'
+                    return f"<div style='{style}'><img src='{html_lib.escape(src, quote=True)}' style='width:100%;height:100%;object-fit:{fit}'/></div>"
+                return ''
+            font = block.get('font_family') if block.get('font_family') in ('Arial', 'Georgia', 'Verdana', 'Tahoma') else 'Arial'
+            try: size = max(8, min(120, int(block.get('font_size', 24) or 24)))
+            except (ValueError, TypeError): size = 24
+            weight = '700' if block.get('bold') else '400'
+            color = str(block.get('color', '#171717'))
+            if not re.fullmatch(r'#[0-9a-fA-F]{6}', color): color = '#171717'
+            value = html_lib.escape(str(value_block.get('text', '')), quote=True)
+            return f"<div style='{style}font:{weight} {size}px {font};color:{color};white-space:pre-wrap'>{value}</div>"
+
+        for i, block in enumerate(template_blocks[:80]):
+            if not isinstance(block, dict) or block.get('scope') == 'item':
+                continue
+            key = str(block.get('holder_key') or '')
+            value = saved_by_key.get(key, saved_blocks[i] if i < len(saved_blocks) and isinstance(saved_blocks[i], dict) else block)
+            pieces.append(block_html(block, value, 0, 0, 100, 100))
+
+        item_blocks = [block for block in template_blocks if isinstance(block, dict) and block.get('scope') == 'item']
+        item_values = data.get('items', []) if isinstance(data.get('items'), list) else []
+        try: count = max(1, min(30, int(template.get('item_count', 1))))
+        except (ValueError, TypeError): count = 1
+        area = template.get('item_area', {}) if isinstance(template.get('item_area'), dict) else {}
+        ax, ay = max(0, min(100, float(area.get('x', 5)))), max(0, min(100, float(area.get('y', 34))))
+        aw, ah = max(1, min(100, float(area.get('width', 90)))), max(1, min(100, float(area.get('height', 60))))
+        try: columns = max(1, min(3, int(area.get('columns', 2))))
+        except (ValueError, TypeError): columns = 2
+        assignments = data.get('item_assignments') if isinstance(data.get('item_assignments'), list) else template.get('item_assignments', [])
+        rows = (count + columns - 1) // columns
+        cell_w, cell_h = aw / columns, ah / rows
+        for item_index in range(count):
+            item = item_values[item_index] if item_index < len(item_values) and isinstance(item_values[item_index], dict) else {}
+            assigned_keys = set(assignments[item_index]) if item_index < len(assignments) and isinstance(assignments[item_index], list) else {str(block.get('holder_key') or '') for block in item_blocks}
+            col, row = item_index % columns, item_index // columns
+            card_style = f'position:absolute;left:{ax + col*cell_w}%;top:{ay + row*cell_h}%;width:{cell_w}%;height:{cell_h}%;overflow:hidden;'
+            pieces.append(f"<div style='{card_style}'>")
+            for block in item_blocks:
+                if str(block.get('holder_key') or '') not in assigned_keys:
+                    continue
+                pieces.append(block_html(block, item.get(str(block.get('holder_key') or ''), {}), 0, 0, 100, 100))
+            pieces.append('</div>')
+
         bg = str(data.get('background', template.get('background', '#fff')))
         if not re.fullmatch(r'#[0-9a-fA-F]{6}', bg): bg = '#ffffff'
         bg_image = str(data.get('background_image', template.get('background_image', ''))).strip()
@@ -460,6 +498,47 @@ class Administrator(APIView):
                 return Response({'status_code': 404, 'status_text': 'Menu not found.'}, status=404)
             return Response({'status_code': 200, 'is_active': bool(request.data.get('is_active'))})
 
+        elif service == 'SaveMenuTemplate':
+            administrator = get_administrator(request.data.get('login_key'))
+            if not administrator:
+                return Response({'status_code': 401, 'status_text': 'Please sign in.'}, status=401)
+            payload = request.data.get('template') if isinstance(request.data.get('template'), dict) else {}
+            name = str(payload.get('name') or '').strip()
+            blocks = payload.get('blocks') if isinstance(payload.get('blocks'), list) else []
+            if not name:
+                return Response({'status_code': 400, 'status_text': 'Enter a template name.'}, status=400)
+            if len(blocks) > 80 or any(not isinstance(block, dict) or block.get('type') not in ('text', 'image') for block in blocks):
+                return Response({'status_code': 400, 'status_text': 'Template holders are invalid.'}, status=400)
+            try:
+                item_count = max(1, min(30, int(payload.get('item_count', 1))))
+            except (TypeError, ValueError):
+                item_count = 1
+            item_area = payload.get('item_area') if isinstance(payload.get('item_area'), dict) else {'x': 5, 'y': 34, 'width': 90, 'height': 60, 'columns': 2}
+            try:
+                columns = max(1, min(3, int(item_area.get('columns', 2))))
+            except (TypeError, ValueError):
+                columns = 2
+            item_area = {key: max(0, min(100, float(item_area.get(key, default)))) for key, default in [('x', 5), ('y', 34), ('width', 90), ('height', 60)]}
+            item_area['columns'] = columns
+            valid_holder_keys = {str(block.get('holder_key')) for block in blocks if block.get('scope') == 'item' and block.get('holder_key')}
+            raw_assignments = payload.get('item_assignments') if isinstance(payload.get('item_assignments'), list) else []
+            item_assignments = [[str(key) for key in raw_assignments[i] if str(key) in valid_holder_keys] if i < len(raw_assignments) and isinstance(raw_assignments[i], list) else [] for i in range(item_count)]
+            template_doc = {'name': name, 'description': 'Custom menu layout', 'background': payload.get('background', '#ffffff'), 'background_image': payload.get('background_image', ''), 'custom_layout': True, 'layout': 'custom', 'blocks': blocks, 'item_count': item_count, 'item_area': item_area, 'item_assignments': item_assignments, 'components': [], 'administrator_id': administrator['_id'], 'updated_at': datetime.now(timezone.utc)}
+            template_id = payload.get('_id')
+            if template_id:
+                try:
+                    object_id = ObjectId(template_id)
+                except Exception:
+                    return Response({'status_code': 400, 'status_text': 'Invalid template id.'}, status=400)
+                result = menu_templates_collection.update_one({'_id': object_id, 'administrator_id': administrator['_id'], 'custom_layout': True}, {'$set': template_doc})
+                if not result.matched_count:
+                    return Response({'status_code': 404, 'status_text': 'Custom template not found.'}, status=404)
+                saved_id = object_id
+            else:
+                template_doc['created_at'] = datetime.now(timezone.utc)
+                saved_id = menu_templates_collection.insert_one(template_doc).inserted_id
+            return Response({'status_code': 200, 'template_id': str(saved_id), 'status_text': 'Template saved.'})
+
         elif service == 'SaveMenu':
             administrator = get_administrator(request.data.get('login_key'))
             if not administrator:
@@ -526,6 +605,22 @@ class Administrator(APIView):
             if not result.deleted_count:
                 return Response({'status_code': 404, 'status_text': 'Menu not found.'}, status=404)
             return Response({'status_code': 200, 'status_text': 'Menu deleted.'})
+
+        elif service == 'DeleteMenuTemplate':
+            administrator = get_administrator(request.data.get('login_key'))
+            if not administrator:
+                return Response({'status_code': 401, 'status_text': 'Please sign in.'}, status=401)
+            try:
+                template_id = ObjectId(request.data.get('template_id'))
+            except Exception:
+                return Response({'status_code': 400, 'status_text': 'Invalid template id.'}, status=400)
+            template = menu_templates_collection.find_one({'_id': template_id, 'administrator_id': administrator['_id'], 'custom_layout': True})
+            if not template:
+                return Response({'status_code': 404, 'status_text': 'Custom template not found.'}, status=404)
+            if menus_collection.find_one({'administrator_id': administrator['_id'], 'template_id': {'$in': [str(template_id), template_id]}}):
+                return Response({'status_code': 409, 'status_text': 'This template is used by a saved menu. Delete or update that menu before removing the template.'}, status=409)
+            menu_templates_collection.delete_one({'_id': template_id, 'administrator_id': administrator['_id'], 'custom_layout': True})
+            return Response({'status_code': 200, 'status_text': 'Custom template deleted.'})
 
         elif service == 'RenderMenuPreview':
             administrator = get_administrator(request.data.get('login_key'))
