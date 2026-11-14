@@ -883,6 +883,7 @@ class Administrator(APIView):
                 "mirror_width": mirror_width,
                 "site_id": site_obj_id,
                 "playback_state": "playing",
+                "is_active": True,
                 "last_active_timestamp": current_time,
                 "contents": []
             })
@@ -892,10 +893,58 @@ class Administrator(APIView):
             login_key = request.data.get('login_key')
             mirror_id = request.data.get('mirror_id')
             administrator = get_administrator(login_key)
-            if administrator and mirror_id:
-                mirror_collection.delete_one({'_id': ObjectId(mirror_id)})
-                return Response({'status_code': 200, 'status_text': 'ok'})
-            return Response({'status_code': 401, 'status_text': 'invalid key'}, status=401)
+            if not administrator or not mirror_id:
+                return Response({'status_code': 401, 'status_text': 'invalid key'}, status=401)
+            try:
+                mirror_object_id = ObjectId(mirror_id)
+            except Exception:
+                return Response({'status_code': 400, 'status_text': 'Invalid mirror_id'}, status=400)
+            mirror = mirror_collection.find_one({'_id': mirror_object_id})
+            if not mirror or str(mirror.get('administrator_id')) != str(administrator['_id']):
+                return Response({'status_code': 404, 'status_text': 'Mirror not found'}, status=404)
+            try:
+                from app.conductor import get_or_create_conductor
+                get_or_create_conductor(mirror_object_id).publish('eligibility_status', {'status_code': 600, 'status_text': 'Mirror deleted'}, retain=True)
+            except Exception as exc:
+                print(f"Could not publish mirror deletion status: {exc}", flush=True)
+            mirror_collection.delete_one({'_id': mirror_object_id})
+            return Response({'status_code': 200, 'status_text': 'Mirror deleted'})
+
+        elif service == 'SetMirrorActiveStatus':
+            administrator = get_administrator(request.data.get('login_key'))
+            mirror_id = request.data.get('mirror_id')
+            if not administrator or not mirror_id:
+                return Response({'status_code': 401, 'status_text': 'Sign in and select a mirror.'}, status=401)
+            try:
+                mirror_object_id = ObjectId(mirror_id)
+            except Exception:
+                return Response({'status_code': 400, 'status_text': 'Invalid mirror_id'}, status=400)
+            mirror = mirror_collection.find_one({'_id': mirror_object_id})
+            if not mirror or str(mirror.get('administrator_id')) != str(administrator['_id']):
+                return Response({'status_code': 404, 'status_text': 'Mirror not found'}, status=404)
+            is_active = request.data.get('is_active') is True
+            mirror_collection.update_one(
+                {'_id': mirror_object_id},
+                {'$set': {
+                    'is_active': is_active,
+                    'status': 'active' if is_active else 'inactive',
+                    'last_refresh_timestamp': time.time()
+                }}
+            )
+            try:
+                from app.conductor import get_or_create_conductor
+                conductor = get_or_create_conductor(mirror_object_id)
+                conductor.notify_state_change()
+                if is_active:
+                    conductor.start()
+                    fresh_mirror = mirror_collection.find_one({'_id': mirror_object_id})
+                    if fresh_mirror:
+                        conductor.publish('init', conductor.get_initial_state(fresh_mirror), retain=True)
+                else:
+                    conductor.publish('eligibility_status', {'status_code': 600, 'status_text': 'Mirror is inactive'}, retain=True)
+            except Exception as exc:
+                print(f"Mirror status playback update notice: {exc}", flush=True)
+            return Response({'status_code': 200, 'status_text': 'Mirror status updated.', 'is_active': is_active})
 
         elif service == 'DeleteSite':
             login_key = request.data.get('login_key')
@@ -1116,6 +1165,7 @@ class Administrator(APIView):
                     'active_content_id': mirror.get('active_content_id'),
                     'active_content_index': mirror.get('active_content_index', 0),
                     'playback_state': mirror.get('playback_state') or 'playing',
+                    'is_active': mirror.get('is_active', True),
                     'last_active_timestamp': last_active,
                     'last_refresh_timestamp': mirror.get('last_refresh_timestamp', 0),
                     'sync_timestamp': mirror.get('sync_timestamp', 0),
@@ -1347,6 +1397,7 @@ class Mirror(APIView):
                     "administrator_id": administrator.get('_id'),
                     "mirror_name": mirror_name,
                     "mirror_description": mirror_description,
+                    "is_active": True,
                     "mirror_login_return_key": username + password,
                     "websocket_channel_name": None,
                     "contents": []
@@ -1387,6 +1438,8 @@ class Mirror(APIView):
                 return Response({'status_text': 'Mirror not found. Check mirror name.', 'status_code': 404}, status=404)
 
             owner = administrators_collection.find_one({'_id': mirror.get('administrator_id')})
+            if mirror.get('is_active') is False or str(mirror.get('status', '')).lower() in ('inactive', 'disabled'):
+                return Response({'status_text': 'This mirror is inactive and cannot play content.', 'status_code': 423, 'mirror_active': False}, status=423)
             if not plan_is_active(owner):
                 return Response({'status_text': 'This mirror is in setup mode. Subscribe to activate live playback.', 'status_code': 402, 'plan_active': False, 'mirror_id': str(mirror.get('_id'))}, status=402)
             
@@ -1601,6 +1654,13 @@ class MirrorStreamView(View):
             return resp
 
         owner = administrators_collection.find_one({'_id': mirror.get('administrator_id')})
+        if mirror.get('is_active') is False or str(mirror.get('status', '')).lower() in ('inactive', 'disabled'):
+            resp = HttpResponse(
+                "event: error\ndata: " + json.dumps({'status_code': 423, 'status_text': 'This mirror is inactive.'}) + "\n\n",
+                content_type="text/event-stream", status=423
+            )
+            resp['Access-Control-Allow-Origin'] = '*'
+            return resp
         if not plan_is_active(owner):
             resp = HttpResponse(
                 "event: error\ndata: " + json.dumps({'status_code': 402, 'status_text': 'Subscribe to activate live playback.'}) + "\n\n",

@@ -268,6 +268,7 @@ class MirrorConductor:
     def _run_loop(self):
         idle_count = 0
         last_status_publish = 0
+        last_eligibility_status = None
         while True:
             try:
                 # The conductor is the server-side virtual screen. It runs even
@@ -292,12 +293,28 @@ class MirrorConductor:
                     eligibility_status = {'status_code': 500, 'status_text': 'Subscribed account not found'}
                 if eligibility_status:
                     self.last_published_content_id = None
+                    last_eligibility_status = eligibility_status
                     if time.time() - last_status_publish >= 3:
                         self.publish('eligibility_status', eligibility_status, retain=True)
                         last_status_publish = time.time()
                     self.interrupt_event.wait(timeout=3.0)
                     self.interrupt_event.clear()
                     continue
+
+                # Replace the retained 500/600 status as soon as playback is
+                # eligible again. The full state lets a connected viewer
+                # recover immediately, including when playback is paused or
+                # the playlist is currently empty.
+                if last_eligibility_status:
+                    initial_state = self.get_initial_state(mirror)
+                    self.broadcast('init', initial_state)
+                    active_contents = initial_state.get('data', [])
+                    if active_contents and mirror.get('playback_state', 'playing') != 'paused':
+                        index = max(0, min(self.current_index, len(active_contents) - 1))
+                        self.last_published_content_id = str(active_contents[index].get('_id'))
+                    else:
+                        self.last_published_content_id = None
+                    last_eligibility_status = None
 
                 contents = self.get_active_contents(mirror)
 
