@@ -40,25 +40,36 @@ class MirrorConductor:
     def _mqtt_published(self, client, userdata, mid, *extra):
         print(f"[MQTT] Broker acknowledged publish mirror={self.mirror_id} mid={mid}", flush=True)
 
+    def _eligibility_status(self):
+        """Return the mirror status event when playback is not eligible."""
+        mirror = mirror_collection.find_one({'_id': self.mirror_id}, {'administrator_id': 1, 'is_active': 1, 'status': 1})
+        if not mirror:
+            return {'status_code': 500, 'status_text': 'Subscribed account not found'}
+        mirror_status = str(mirror.get('status', '')).strip().lower()
+        if mirror.get('is_active') is False or mirror_status in ('inactive', 'disabled'):
+            return {'status_code': 600, 'status_text': 'Mirror is inactive'}
+        administrator_id = mirror.get('administrator_id')
+        owner = None
+        if administrator_id is not None:
+            owner = administrators_collection.find_one({'_id': administrator_id}, {'subscription': 1})
+            if owner is None:
+                owner = administrators_collection.find_one({'_id': str(administrator_id)}, {'subscription': 1})
+        subscription = (owner or {}).get('subscription', {})
+        if subscription.get('status') != 'active' or not subscription.get('plan_id'):
+            return {'status_code': 500, 'status_text': 'Subscribed account not found'}
+        return None
+
     def publish(self, event_type, data, retain=False):
         """Publish a JSON event to every display subscribed to this mirror."""
         # Check eligibility at the publish boundary so every MQTT event path,
-        # including retained playback state, observes subscription changes.
+        # including retained playback state, observes account and mirror changes.
         try:
-            mirror = mirror_collection.find_one({'_id': self.mirror_id}, {'administrator_id': 1})
-            administrator_id = (mirror or {}).get('administrator_id')
-            owner = None
-            if administrator_id is not None:
-                owner = administrators_collection.find_one({'_id': administrator_id}, {'subscription': 1})
-                if owner is None:
-                    owner = administrators_collection.find_one({'_id': str(administrator_id)}, {'subscription': 1})
+            status = self._eligibility_status()
         except Exception as exc:
-            print(f"[MQTT] Not publishing for mirror {self.mirror_id}: eligibility check failed: {exc}", flush=True)
-            return
-        subscription = (owner or {}).get('subscription', {})
-        if subscription.get('status') != 'active' or not subscription.get('plan_id'):
-            print(f"[MQTT] Not publishing for mirror {self.mirror_id}: account has no active subscription", flush=True)
-            return
+            print(f"[MQTT] Eligibility check failed for mirror {self.mirror_id}: {exc}", flush=True)
+            status = {'status_code': 500, 'status_text': 'Subscribed account not found'}
+        if status:
+            event_type, data, retain = 'eligibility_status', status, True
 
         broker = os.environ.get('MQTT_BROKER_HOST')
         broker_url = os.environ.get('MQTT_BROKER_URL')
@@ -256,6 +267,7 @@ class MirrorConductor:
 
     def _run_loop(self):
         idle_count = 0
+        last_status_publish = 0
         while True:
             try:
                 # The conductor is the server-side virtual screen. It runs even
@@ -270,6 +282,23 @@ class MirrorConductor:
                     self.interrupt_event.wait(timeout=3.0)
                     self.interrupt_event.clear()
                     continue
+
+                # Keep subscribed viewers informed while blocked. The MQTT
+                # publish boundary changes this event to 500/600 as needed.
+                try:
+                    eligibility_status = self._eligibility_status()
+                except Exception as exc:
+                    print(f"[MQTT] Eligibility check failed for mirror {self.mirror_id}: {exc}", flush=True)
+                    eligibility_status = {'status_code': 500, 'status_text': 'Subscribed account not found'}
+                if eligibility_status:
+                    self.last_published_content_id = None
+                    if time.time() - last_status_publish >= 3:
+                        self.publish('eligibility_status', eligibility_status, retain=True)
+                        last_status_publish = time.time()
+                    self.interrupt_event.wait(timeout=3.0)
+                    self.interrupt_event.clear()
+                    continue
+
                 contents = self.get_active_contents(mirror)
 
                 # Detect playlist updates (added, reordered, or removed content)

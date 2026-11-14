@@ -1258,9 +1258,17 @@ class Mirror(APIView):
                     mirror = mirror_collection.find_one({'username': clean_u})
 
             if mirror:
+                mirror_status = str(mirror.get('status', '')).strip().lower()
+                if mirror.get('is_active') is False or mirror_status in ('inactive', 'disabled'):
+                    return Response({
+                        'status_text': 'This mirror is inactive. Reactivate it in the MirrorLink control panel to resume playback.',
+                        'status_code': 423,
+                        'mirror_active': False,
+                        'mirror_id': str(mirror.get('_id')),
+                    }, status=423)
                 owner = administrators_collection.find_one({'_id': mirror.get('administrator_id')})
                 if not plan_is_active(owner):
-                    return Response({'status_text': 'This mirror is in setup mode. Subscribe to activate live playback.', 'status_code': 402, 'plan_active': False}, status=402)
+                    return Response({'status_text': 'This mirror is in setup mode. Subscribe to activate live playback.', 'status_code': 402, 'plan_active': False, 'mirror_id': str(mirror.get('_id'))}, status=402)
                 current_time = time.time()
                 mirror_collection.update_one(
                     {'_id': mirror.get('_id')},
@@ -1380,7 +1388,7 @@ class Mirror(APIView):
 
             owner = administrators_collection.find_one({'_id': mirror.get('administrator_id')})
             if not plan_is_active(owner):
-                return Response({'status_text': 'This mirror is in setup mode. Subscribe to activate live playback.', 'status_code': 402, 'plan_active': False}, status=402)
+                return Response({'status_text': 'This mirror is in setup mode. Subscribe to activate live playback.', 'status_code': 402, 'plan_active': False, 'mirror_id': str(mirror.get('_id'))}, status=402)
             
             disabled_set = {str(d) for d in mirror.get('disabled_contents', [])}
             content_durations = mirror.get('content_durations', {})
