@@ -10,6 +10,10 @@ import re
 import html as html_lib
 import tempfile
 import uuid
+import ipaddress
+import socket
+import urllib.parse
+import requests
 from datetime import datetime, timedelta, timezone
 from bson import ObjectId
 from django.conf import settings
@@ -224,12 +228,38 @@ def render_custom_menu_svg(menu, template, width, height):
     def pct(value, default=0, minimum=0, maximum=100):
         try: return max(minimum, min(maximum, float(value)))
         except (TypeError, ValueError): return default
+    def inline_image(src):
+        if src.startswith('data:image/'):
+            return src
+        try:
+            parsed = urllib.parse.urlparse(src)
+            if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password:
+                return ''
+            addresses = {entry[4][0] for entry in socket.getaddrinfo(parsed.hostname, None)}
+            if not addresses or any(not ipaddress.ip_address(address).is_global for address in addresses):
+                return ''
+            response = requests.get(src, timeout=(3, 8), allow_redirects=False, stream=True)
+            if response.status_code != 200 or not (response.headers.get('Content-Type', '').split(';')[0].lower().startswith('image/')):
+                return ''
+            mime = response.headers.get('Content-Type', '').split(';')[0].lower()
+            if mime == 'image/svg+xml':
+                return ''
+            chunks, total = [], 0
+            for chunk in response.iter_content(64 * 1024):
+                total += len(chunk)
+                if total > 8 * 1024 * 1024: return ''
+                chunks.append(chunk)
+            return f"data:{mime};base64,{base64.b64encode(b''.join(chunks)).decode('ascii')}"
+        except Exception:
+            return ''
     bg = str(data.get('background') or template.get('background') or '#ffffff')
     if not re.fullmatch(r'#[0-9a-fA-F]{6}', bg): bg = '#ffffff'
     bg_image = str(data.get('background_image') or template.get('background_image') or '').strip()
     parts = [f"<rect width='{width}' height='{height}' fill='{bg}'/>"]
     if bg_image.startswith(('https://', 'http://', 'data:image/')):
-        parts.append(f"<image href='{esc(bg_image)}' x='0' y='0' width='{width}' height='{height}' preserveAspectRatio='xMidYMid slice'/>")
+        embedded_bg = inline_image(bg_image)
+        if embedded_bg:
+            parts.append(f"<image href='{esc(embedded_bg)}' x='0' y='0' width='{width}' height='{height}' preserveAspectRatio='xMidYMid slice'/>")
     def draw(block, value, index):
         if not isinstance(block, dict): return
         x, y = pct(block.get('x')), pct(block.get('y'))
@@ -242,6 +272,8 @@ def render_custom_menu_svg(menu, template, width, height):
         if block.get('type') == 'image':
             src = str(value.get('image_url') or '').strip()
             if src.startswith(('https://', 'http://', 'data:image/')):
+                src = inline_image(src)
+            if src:
                 fit = 'xMidYMid meet' if block.get('crop') == 'contain' else 'xMidYMid slice'
                 parts.append(f"<image href='{esc(src)}' x='{x}' y='{y}' width='{w}' height='{h}' preserveAspectRatio='{fit}'/>")
         else:
@@ -280,7 +312,7 @@ def render_custom_menu_svg(menu, template, width, height):
 
 
 def store_menu_artwork(menu, template, administrator_id, menu_id):
-    """Upload a fresh SVG artwork object and return its public URL."""
+    """Upload a fresh SVG artwork object and return its URL and inline DB copy."""
     orientation = template.get('canvas_orientation', 'portrait')
     width, height = (1200, 1920) if orientation == 'portrait' else (1920, 1200)
     preview = render_menu_svg(menu, template, width, height)
@@ -290,7 +322,7 @@ def store_menu_artwork(menu, template, administrator_id, menu_id):
             temp.write(svg_bytes)
             temp_path = temp.name
         key = f"menus/{administrator_id}/{menu_id}/{uuid.uuid4().hex}.svg"
-        return upload_file_to_s3(temp_path, object_name=key, content_type='image/svg+xml') or preview
+        return {'url': upload_file_to_s3(temp_path, object_name=key, content_type='image/svg+xml'), 'data': preview}
     except Exception as exc:
         print(f"[Menu artwork] Could not store artwork: {exc}")
         return None
