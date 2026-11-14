@@ -17,9 +17,12 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path
 from .views import Administrator, Mirror, MirrorStreamView
+from .billing import Billing, RazorpayWebhook
 
 urlpatterns = [
     path('Administrator', Administrator.as_view()),
     path('Mirror', Mirror.as_view()),
     path('MirrorStream', MirrorStreamView.as_view()),
+    path('Billing', Billing.as_view()),
+    path('RazorpayWebhook', RazorpayWebhook.as_view()),
 ]

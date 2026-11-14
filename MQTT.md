@@ -12,4 +12,34 @@ The server logs `[VirtualScreen] Playback conductor started` and `[VirtualScreen
 
 Set `window.MIRRORLINK_MQTT_URL` in `MirrorLink-Viewer/index.html` to the broker's browser WebSocket endpoint. The broker must expose both the configured server listener and a WebSocket listener, and allow authenticated viewers to subscribe to their mirror topic. `paho-mqtt` is included in the server requirements.
 
+## Mosquitto and Nginx WebSocket example
+
+The current viewer URL `wss://mirrorlink.bigburry.com/mqtt` works only if Nginx upgrades WebSocket requests and proxies them to a Mosquitto listener. A `200 OK` handshake response means the request is currently reaching an ordinary HTTP handler instead.
+
+On the broker, keep the server's local MQTT listener and add a WebSocket listener (Mosquitto supports `protocol websockets` on a listener):
+
+```conf
+listener 1883 127.0.0.1
+protocol mqtt
+
+listener 9001 127.0.0.1
+protocol websockets
+```
+
+Inside the TLS `server` block for `mirrorlink.bigburry.com`, route `/mqtt` to that listener before the site's normal HTTP proxy/static locations:
+
+```nginx
+location = /mqtt {
+    proxy_pass http://127.0.0.1:9001/;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_read_timeout 3600s;
+    proxy_buffering off;
+}
+```
+
+Restart Mosquitto and reload Nginx after applying the deployment configuration. Keep port 9001 bound to loopback; browsers connect through HTTPS/WSS on port 443. If your broker is not Mosquitto, configure its equivalent WebSocket listener and proxy path.
+
 If browser clients need MQTT connection options, set `window.MIRRORLINK_MQTT_OPTIONS` in the viewer and web app HTML configuration (for example, username/password or a broker-issued short-lived credential). Apply broker ACLs so a display can subscribe only to its assigned `mirror/<id>` topic.

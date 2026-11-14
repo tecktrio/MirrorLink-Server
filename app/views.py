@@ -8,6 +8,7 @@ from bson import ObjectId
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from .models import administrators_collection, mirror_collection, sites_collection, content_collection
+from .billing import PLAN, administrator_ids, count_administrator_mirrors, count_administrator_sites
 from s3_config import upload_file_to_s3, delete_file_from_s3
 
 
@@ -276,9 +277,36 @@ class Administrator(APIView):
             mirrors = request.data.get('mirrors', [])
             administrator = get_administrator(login_key)
             if administrator and site_id:
+                administrator_id = administrator.get('_id')
+                try:
+                    site_object_id = ObjectId(site_id)
+                except Exception:
+                    site_object_id = site_id
+                site = sites_collection.find_one({
+                    '_id': site_object_id,
+                    'administrator_id': {'$in': administrator_ids(administrator_id)}
+                })
+                if not site:
+                    return Response({'status_text': 'Site not found in your account.', 'status_code': 404}, status=404)
+                owned_query = {'administrator_id': {'$in': administrator_ids(administrator_id)}}
+                target_mirrors = []
                 for mirror in mirrors:
                     mirror_id = mirror.get('_id') if isinstance(mirror, dict) else mirror
-                    mirror_collection.update_one({'_id': ObjectId(mirror_id)}, {'$set': {'site_id': ObjectId(site_id)}})
+                    try:
+                        mirror_object_id = ObjectId(mirror_id)
+                    except Exception:
+                        mirror_object_id = mirror_id
+                    found = mirror_collection.find_one({'_id': mirror_object_id, **owned_query})
+                    if found and str(found.get('site_id')) != str(site_object_id):
+                        target_mirrors.append(found)
+                assigned_count = mirror_collection.count_documents({
+                    **owned_query,
+                    'site_id': {'$in': [site_object_id, str(site_object_id)]}
+                })
+                if assigned_count + len(target_mirrors) > PLAN['mirrors_per_site']:
+                    return Response({'status_text': 'This plan allows up to 50 mirrors per site.', 'status_code': 400}, status=400)
+                for mirror in target_mirrors:
+                    mirror_collection.update_one({'_id': mirror['_id']}, {'$set': {'site_id': site_object_id}})
                 return Response({'status_text': 'Mirror added to site Successfully', 'status_code': 200})
             return Response({'status_text': 'Invalid key or site_id', 'status_code': 400}, status=400)
 
@@ -684,6 +712,8 @@ class Administrator(APIView):
             administrator = get_administrator(login_key)
             if administrator:
                 administrator_id = administrator.get('_id')
+                if count_administrator_sites(administrator_id) >= PLAN['sites']:
+                    return Response({'status_code': 400, 'status_text': 'This plan allows up to 10 sites.'}, status=400)
                 sites_collection.insert_one({
                     "site_name": site_name,
                     "site_description": site_description or '',
@@ -699,6 +729,8 @@ class Administrator(APIView):
                 return Response({'status_code': 401, 'status_text': 'invalid key'}, status=401)
             
             administrator_id = administrator.get('_id')
+            if count_administrator_mirrors(administrator_id) >= PLAN['sites'] * PLAN['mirrors_per_site']:
+                return Response({'status_code': 400, 'status_text': 'This plan allows up to 50 mirrors at each of 10 sites.'}, status=400)
             mirror_name = request.data.get('mirror_name', '').strip()
             if not mirror_name:
                 return Response({'status_code': 400, 'status_text': 'Mirror Name is required.'}, status=400)
@@ -725,6 +757,18 @@ class Administrator(APIView):
                     site_obj_id = ObjectId(site_id)
                 except Exception:
                     site_obj_id = site_id
+
+                site = sites_collection.find_one({
+                    '_id': site_obj_id,
+                    'administrator_id': {'$in': administrator_ids(administrator_id)}
+                })
+                if not site:
+                    return Response({'status_code': 400, 'status_text': 'Select a site belonging to your account.'}, status=400)
+                if mirror_collection.count_documents({
+                    'administrator_id': {'$in': administrator_ids(administrator_id)},
+                    'site_id': {'$in': [site_obj_id, str(site_obj_id)]}
+                }) >= PLAN['mirrors_per_site']:
+                    return Response({'status_code': 400, 'status_text': 'This plan allows up to 50 mirrors per site.'}, status=400)
 
             current_time = time.time()
             res = mirror_collection.insert_one({
@@ -792,6 +836,8 @@ class Administrator(APIView):
             
             administrator = administrators_collection.find_one({"username": administrator_username})
             if administrator is not None:
+                if count_administrator_sites(administrator.get('_id')) >= PLAN['sites']:
+                    return Response({'status_code': 400, 'status_text': 'This plan allows up to 10 sites.'}, status=400)
                 site_data = {
                     "site_name": site_name,
                     "administrator_id": administrator.get('_id'),
@@ -1173,6 +1219,14 @@ class Mirror(APIView):
             administrator = administrators_collection.find_one({"username": administrator_username})
             if administrator:
                 site = sites_collection.find_one({'site_name': site_name, 'administrator_id': {'$in': [administrator.get("_id"), str(administrator.get("_id"))]}})
+                administrator_id = administrator.get('_id')
+                if count_administrator_mirrors(administrator_id) >= PLAN['sites'] * PLAN['mirrors_per_site']:
+                    return Response({'status_code': 400, 'status_text': 'This plan allows up to 50 mirrors at each of 10 sites.'}, status=400)
+                if site and mirror_collection.count_documents({
+                    'administrator_id': {'$in': administrator_ids(administrator_id)},
+                    'site_id': {'$in': [site.get('_id'), str(site.get('_id'))]}
+                }) >= PLAN['mirrors_per_site']:
+                    return Response({'status_code': 400, 'status_text': 'This plan allows up to 50 mirrors per site.'}, status=400)
                 mirror_data = {
                     "username": username,
                     "password": password,
