@@ -4,26 +4,65 @@ import time
 import json
 import queue
 import asyncio
+import hashlib
+import secrets
+import re
+from datetime import datetime, timedelta, timezone
 from bson import ObjectId
+from django.conf import settings
+from django.core.mail import send_mail
+from django.contrib.auth.hashers import make_password, check_password
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from .models import administrators_collection, mirror_collection, sites_collection, content_collection
+from .models import administrators_collection, users_collection, plans_collection, mirror_collection, sites_collection, content_collection
 from .billing import PLAN, administrator_ids, count_administrator_mirrors, count_administrator_sites
 from s3_config import upload_file_to_s3, delete_file_from_s3
 
 
 def get_administrator(login_key=None):
     if login_key:
-        admin = administrators_collection.find_one({'login_key': login_key})
-        if admin:
-            return admin
-    all_admins = list(administrators_collection.find())
-    if all_admins:
-        if login_key:
-            administrators_collection.update_one({'_id': all_admins[0]['_id']}, {'$set': {'login_key': login_key}})
-            all_admins[0]['login_key'] = login_key
-        return all_admins[0]
+        return administrators_collection.find_one({'login_key': login_key})
     return None
+
+
+def plan_is_active(user):
+    subscription = (user or {}).get('subscription', {})
+    return subscription.get('status') == 'active' and bool(subscription.get('plan_id'))
+
+
+def send_email_otp(email, purpose):
+    code = f"{secrets.randbelow(1000000):06d}"
+    otp_hash = hashlib.sha256(code.encode()).hexdigest()
+    record = {'email_id': email.lower().strip(), 'purpose': purpose, 'otp_hash': otp_hash,
+              'expires_at': datetime.now(timezone.utc) + timedelta(minutes=10), 'created_at': datetime.now(timezone.utc)}
+    # Keep one current challenge per email and purpose.
+    users_collection.update_one({'email_id': record['email_id']}, {'$set': {f'otp.{purpose}': record}}, upsert=True)
+    try:
+        send_mail('Your MirrorLink verification code', f'Your verification code is {code}. It expires in 10 minutes.',
+                  getattr(settings, 'DEFAULT_FROM_EMAIL', None), [record['email_id']], fail_silently=False)
+    except Exception:
+        users_collection.update_one({'email_id': record['email_id']}, {'$unset': {f'otp.{purpose}': ''}})
+        raise
+
+
+def consume_email_otp(email, code, purpose):
+    email = (email or '').lower().strip()
+    challenge = users_collection.find_one({'email_id': email}, {f'otp.{purpose}': 1}) or {}
+    challenge = challenge.get('otp', {}).get(purpose, {})
+    if not challenge or challenge.get('attempts', 0) >= 5:
+        return False
+    expires_at = challenge.get('expires_at')
+    if not expires_at:
+        return False
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= datetime.now(timezone.utc):
+        return False
+    if not secrets.compare_digest(challenge.get('otp_hash', ''), hashlib.sha256(str(code or '').encode()).hexdigest()):
+        users_collection.update_one({'email_id': email}, {'$inc': {f'otp.{purpose}.attempts': 1}})
+        return False
+    users_collection.update_one({'email_id': email}, {'$unset': {f'otp.{purpose}': ''}})
+    return True
 
 
 def serialize_doc(obj):
@@ -46,21 +85,62 @@ class Administrator(APIView):
             return Response({'status_code': 400, 'status_text': 'Required service'}, status=400)
 
         if service == 'login':
-            username = request.data.get('username')
+            username = (request.data.get('email') or request.data.get('username') or '').lower().strip()
             password = request.data.get('password')
-            administrator = administrators_collection.find_one({"username": username, "password": password})
+            administrator = administrators_collection.find_one({"email_id": username})
+            if administrator and not check_password(str(password or ''), administrator.get('password_hash', '')):
+                administrator = None
+            # Existing installations used plaintext passwords; accept them once and migrate on successful login.
+            if not administrator:
+                administrator = administrators_collection.find_one({"$or": [{"email_id": username}, {"username": username}], "password": password})
+                if administrator:
+                    migrated_hash = make_password(str(password))
+                    administrators_collection.update_one({'_id': administrator['_id']}, {'$set': {'password_hash': migrated_hash}, '$unset': {'password': ''}})
+                    users_collection.update_one({'_id': administrator['_id']}, {'$set': {'password_hash': migrated_hash}, '$unset': {'password': ''}})
             if administrator:
-                login_key = administrator.get('login_key') or (username + password)
-                return Response({'status_text': 'ok', 'status_code': 200, 'login_key': login_key})
+                login_key = administrator.get('login_key') or secrets.token_urlsafe(32)
+                administrators_collection.update_one({'_id': administrator['_id']}, {'$set': {'login_key': login_key}})
+                return Response({'status_text': 'ok', 'status_code': 200, 'login_key': login_key,
+                                 'plan_active': plan_is_active(administrator)})
             return Response({'status_text': 'UnAuthorised', 'status_code': 401}, status=401)
+
+        elif service == 'request_otp':
+            email = (request.data.get('email') or '').lower().strip()
+            purpose = request.data.get('purpose')
+            if not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', email) or purpose not in ('register', 'reset_password'):
+                return Response({'status_text': 'A valid email and OTP purpose are required.', 'status_code': 400}, status=400)
+            existing = administrators_collection.find_one({'email_id': email})
+            if purpose == 'register' and existing:
+                return Response({'status_text': 'Email already exists. Please sign in.', 'status_code': 409}, status=409)
+            if purpose == 'reset_password' and not existing:
+                return Response({'status_text': 'If the account exists, a verification code has been sent.', 'status_code': 200})
+            try:
+                send_email_otp(email, purpose)
+            except Exception:
+                return Response({'status_text': 'Email delivery is unavailable. Configure the server email backend and try again.', 'status_code': 503}, status=503)
+            return Response({'status_text': 'Verification code sent.', 'status_code': 200})
+
+        elif service == 'reset_password':
+            email = (request.data.get('email') or '').lower().strip()
+            password = request.data.get('password') or ''
+            if len(password) < 8 or not consume_email_otp(email, request.data.get('otp'), 'reset_password'):
+                return Response({'status_text': 'Invalid or expired code, or password must be at least 8 characters.', 'status_code': 400}, status=400)
+            password_hash = make_password(password)
+            result = administrators_collection.update_one({'email_id': email}, {'$set': {'password_hash': password_hash}, '$unset': {'password': ''}})
+            if not result.matched_count:
+                return Response({'status_text': 'Account not found.', 'status_code': 404}, status=404)
+            users_collection.update_one({'email_id': email}, {'$set': {'password_hash': password_hash}, '$unset': {'password': ''}})
+            return Response({'status_text': 'Password updated. Please sign in.', 'status_code': 200})
         
         elif service == 'register':
-            required_data = ['username', 'password', 'email']
+            required_data = ['username', 'password', 'email', 'otp']
             if not all(field in request.data for field in required_data):
                 return Response({"status_text": "Required keys: username, password, email"}, status=400)
-            username = request.data['username']
+            username = request.data['username'].strip()
             password = request.data['password']
-            email_id = request.data['email']
+            email_id = request.data['email'].lower().strip()
+            if len(password) < 8 or not consume_email_otp(email_id, request.data.get('otp'), 'register'):
+                return Response({'status_text': 'A valid, unexpired email verification code and password of at least 8 characters are required.', 'status_code': 400}, status=400)
             profile_image_url = request.data.get('profile_image_url', '')
             contact = request.data.get('contact', '')
             address_line_1 = request.data.get('address_line_1', '')
@@ -74,17 +154,35 @@ class Administrator(APIView):
 
             administrator_data = {
                 "username": username,
-                "password": password,
+                "password_hash": make_password(password),
                 "email_id": email_id,
                 "profile_image_url": profile_image_url,
                 "contact": contact,
                 "address_line_1": address_line_1,
                 "address_line_2": address_line_2,
                 "address_line_3": address_line_3,
-                "login_key": username + password,
+                "login_key": secrets.token_urlsafe(32),
+                "created_at": datetime.now(timezone.utc),
+                "subscription": {"status": "inactive"},
             }
-            administrators_collection.insert_one(administrator_data)
-            return Response({'status_text': 'Registered Successfully', 'status_code': 200, 'login_key': username + password})
+            inserted = administrators_collection.insert_one(administrator_data)
+            administrator_data['_id'] = inserted.inserted_id
+            users_collection.delete_one({'email_id': email_id})
+            users_collection.replace_one({'_id': inserted.inserted_id}, administrator_data, upsert=True)
+            return Response({'status_text': 'Registered Successfully', 'status_code': 200, 'login_key': administrator_data['login_key'], 'plan_active': False})
+
+        elif service == 'check_plan':
+            user = get_administrator(request.data.get('login_key'))
+            if not user:
+                return Response({'status_text': 'Please sign in.', 'status_code': 401}, status=401)
+            return Response({'status_code': 200, 'plan_active': plan_is_active(user), 'subscription': user.get('subscription', {})})
+
+        elif service not in ('request_otp', 'reset_password', 'check_plan'):
+            user = get_administrator(request.data.get('login_key'))
+            if not user:
+                return Response({'status_text': 'Please sign in.', 'status_code': 401}, status=401)
+            if not plan_is_active(user):
+                return Response({'status_text': 'An active MirrorLink plan is required to use the control panel.', 'status_code': 402, 'plan_active': False}, status=402)
             
         elif service == 'AddContent':      
             login_key = request.data.get('login_key')

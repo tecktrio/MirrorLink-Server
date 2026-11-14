@@ -18,3 +18,7 @@ MirrorLink's single subscription is **MirrorLink Business**: INR 25,000 billed m
 4. Test with Razorpay test mode keys and a test plan before switching to live keys and a live plan.
 
 The backend checks that the configured plan is monthly and matches INR 25,000 before creating subscriptions. It verifies checkout signatures on the server and validates webhook signatures. Razorpay subscription billing supports at most 120 monthly charges, so the checkout is configured for 120 cycles (10 years); customers must subscribe again to continue after that period. The Razorpay account must have Subscriptions enabled for recurring mandates.
+
+## Email OTP delivery
+
+Registration and password reset send six-digit codes that expire after 10 minutes. Configure the server environment with `SMTP_HOST`, `SMTP_PORT` (usually `587`), `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_USE_TLS` (`true` or `false`), and `DEFAULT_FROM_EMAIL`. OTP challenges are kept in the MongoDB `users` collection; plan catalog details are kept in `plans`. Account records continue to be mirrored in `administrators` for compatibility with existing MirrorLink data ownership and billing.

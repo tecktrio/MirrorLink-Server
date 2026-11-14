@@ -34,6 +34,8 @@ except Exception as e:
 
 # Application collection handles
 administrators = db['administrators']
+users = db['users']
+plans = db['plans']
 sites = db['sites']
 mirrors = db['mirrors']
 content = db['content']

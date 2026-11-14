@@ -138,6 +138,17 @@ STATIC_URL = 'static/'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
+# Email OTP delivery. Configure SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD,
+# SMTP_USE_TLS and DEFAULT_FROM_EMAIL in the server environment.
+import os
+EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_HOST = os.environ.get('SMTP_HOST', '')
+EMAIL_PORT = int(os.environ.get('SMTP_PORT', '587'))
+EMAIL_HOST_USER = os.environ.get('SMTP_USER', '')
+EMAIL_HOST_PASSWORD = os.environ.get('SMTP_PASSWORD', '')
+EMAIL_USE_TLS = os.environ.get('SMTP_USE_TLS', 'true').lower() == 'true'
+DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', EMAIL_HOST_USER or 'noreply@mirrorlink.bigburry.com')
+
 # ==========================================
 # File & Data Upload Limits (Allow Videos up to 500MB)
 # ==========================================

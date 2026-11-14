@@ -8,11 +8,12 @@ import requests
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import administrators_collection
+from .models import administrators_collection, users_collection, plans_collection
 from .models import mirror_collection, sites_collection
 
 
 PLAN = {
+    "plan_id": os.environ.get("RAZORPAY_PLAN_ID", ""),
     "name": "MirrorLink Business",
     "amount": 2500000,
     "currency": "INR",
@@ -22,6 +23,7 @@ PLAN = {
     "sites": 10,
     "mirrors_per_site": 50,
 }
+plans_collection.update_one({"name": PLAN["name"]}, {"$set": {**PLAN, "updated_at": int(time.time())}, "$setOnInsert": {"created_at": int(time.time())}}, upsert=True)
 RAZORPAY_API = "https://api.razorpay.com/v1"
 
 
@@ -109,6 +111,7 @@ class Billing(APIView):
                 if not response.ok:
                     return error_response("Razorpay could not create the subscription. Please try again.", 502)
                 subscription = response.json()
+                plans_collection.update_one({"name": PLAN["name"]}, {"$set": {**PLAN, "plan_id": plan_id, "updated_at": int(time.time())}, "$setOnInsert": {"created_at": int(time.time())}}, upsert=True)
                 administrators_collection.update_one(
                     {"_id": admin["_id"]},
                     {"$set": {"subscription": {
@@ -119,6 +122,11 @@ class Billing(APIView):
                         "created_at": int(time.time()),
                     }}},
                 )
+                users_collection.update_one({"_id": admin["_id"]}, {"$set": {"subscription": {
+                    "plan_name": PLAN["name"], "plan_id": plan_id,
+                    "razorpay_subscription_id": subscription["id"],
+                    "status": subscription.get("status", "created"), "created_at": int(time.time()),
+                }}}, upsert=True)
                 return Response({"status_code": 200, "key_id": key_id, "subscription_id": subscription["id"], "plan": PLAN})
             except requests.RequestException:
                 return error_response("Could not reach Razorpay. Please try again shortly.", 502)
@@ -156,6 +164,10 @@ class Billing(APIView):
                         "subscription.verified_at": int(time.time()),
                     }},
                 )
+                users_collection.update_one(
+                    {"_id": admin["_id"], "subscription.razorpay_subscription_id": subscription_id},
+                    {"$set": {"subscription.status": remote_status, "subscription.razorpay_payment_id": payment_id, "subscription.verified_at": int(time.time())}},
+                )
                 return Response({"status_code": 200, "status_text": "Payment authorization verified.", "subscription_status": remote_status})
             except requests.RequestException:
                 return error_response("Payment signature was verified, but Razorpay status could not be checked. Please retry.", 502)
@@ -190,6 +202,10 @@ class RazorpayWebhook(APIView):
                         "subscription.last_event": event_name,
                         "subscription.updated_at": int(time.time()),
                     }},
+                )
+                users_collection.update_one(
+                    {"subscription.razorpay_subscription_id": subscription_id},
+                    {"$set": {"subscription.status": status, "subscription.last_event": event_name, "subscription.updated_at": int(time.time())}},
                 )
             return Response({"status": "ok"})
         except (ValueError, TypeError):
