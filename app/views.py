@@ -181,12 +181,15 @@ def render_menu_svg(menu, template, width=1920, height=1080):
             f"<article>{image_markup}<div class='item-copy'><strong>{name}</strong>"
             f"<span class='price'>{price}</span><p>{description}</p></div></article>"
         )
-    template_html = template.get('html_template', MENU_TEMPLATE_SEEDS[0]['html_template'])
-    rendered = template_html.replace('{{eyebrow}}', field_value('eyebrow'))
-    rendered = rendered.replace('{{title}}', field_value('title', menu.get('title', 'Menu')))
-    rendered = rendered.replace('{{subtitle}}', field_value('subtitle'))
-    rendered = rendered.replace('{{footer}}', field_value('footer'))
-    rendered = rendered.replace('{{items}}', ''.join(item_markup))
+    if template.get('custom_layout'):
+        rendered = render_menu_html(menu, template)
+    else:
+        template_html = template.get('html_template', MENU_TEMPLATE_SEEDS[0]['html_template'])
+        rendered = template_html.replace('{{eyebrow}}', field_value('eyebrow'))
+        rendered = rendered.replace('{{title}}', field_value('title', menu.get('title', 'Menu')))
+        rendered = rendered.replace('{{subtitle}}', field_value('subtitle'))
+        rendered = rendered.replace('{{footer}}', field_value('footer'))
+        rendered = rendered.replace('{{items}}', ''.join(item_markup))
     css = f"""
       * {{ box-sizing:border-box; }} html,body {{ margin:0;width:{width}px;height:{height}px;overflow:hidden; }}
       body {{ font-family:Arial,sans-serif;background:{background};color:#161616; }}
@@ -209,6 +212,34 @@ def render_menu_svg(menu, template, width=1920, height=1080):
 
 def render_menu_html(menu, template):
     data = menu.get('data', {})
+    if template.get('custom_layout'):
+        blocks = data.get('blocks', template.get('blocks', []))
+        pieces = []
+        for block in blocks[:80] if isinstance(blocks, list) else []:
+            if not isinstance(block, dict):
+                continue
+            x, y = max(0, min(100, float(block.get('x', 0) or 0))), max(0, min(100, float(block.get('y', 0) or 0)))
+            w, h = max(1, min(100, float(block.get('width', 20) or 20))), max(1, min(100, float(block.get('height', 15) or 15)))
+            style = f'left:{x}%;top:{y}%;width:{w}%;height:{h}%;position:absolute;overflow:hidden;'
+            if block.get('type') == 'image':
+                src = str(block.get('image_url', '')).strip()
+                if src.startswith(('https://', 'http://', 'data:image/')):
+                    pieces.append(f"<div style='{style}'><img src='{html_lib.escape(src, quote=True)}' style='width:100%;height:100%;object-fit:cover'/></div>")
+            else:
+                font = block.get('font_family') if block.get('font_family') in ('Arial', 'Georgia', 'Verdana', 'Tahoma') else 'Arial'
+                size = max(8, min(120, int(block.get('font_size', 24) or 24)))
+                weight = '700' if block.get('bold') else '400'
+                color = str(block.get('color', '#171717'))
+                if not re.fullmatch(r'#[0-9a-fA-F]{6}', color): color = '#171717'
+                value = html_lib.escape(str(block.get('text', '')), quote=True)
+                pieces.append(f"<div style='{style}font:{weight} {size}px {font};color:{color};white-space:pre-wrap'>{value}</div>")
+        bg = str(data.get('background', template.get('background', '#fff')))
+        if not re.fullmatch(r'#[0-9a-fA-F]{6}', bg): bg = '#ffffff'
+        bg_image = str(data.get('background_image', template.get('background_image', ''))).strip()
+        bg_style = f'background:{bg};'
+        if bg_image.startswith(('https://', 'http://', 'data:image/')):
+            bg_style += f"background-image:url('{html_lib.escape(bg_image, quote=True)}');background-size:cover;background-position:center;"
+        return f"<div style='position:relative;width:100%;height:100%;min-height:100vh;overflow:hidden;{bg_style}'>{''.join(pieces)}</div>"
     def text(key, default=''):
         component = next((item for item in template.get('components', []) if item.get('key') == key), {})
         return html_lib.escape(str(data.get(key, component.get('default', default)) or ''), quote=True)
@@ -335,7 +366,9 @@ class Administrator(APIView):
 
         elif service == 'GetMenuTemplates':
             ensure_menu_templates()
-            templates = [serialize_doc(dict(item)) for item in menu_templates_collection.find({})]
+            administrator = get_administrator(request.data.get('login_key'))
+            query = {'$or': [{'administrator_id': administrator['_id']}, {'administrator_id': {'$exists': False}}]} if administrator else {'administrator_id': {'$exists': False}}
+            templates = [serialize_doc(dict(item)) for item in menu_templates_collection.find(query)]
             return Response({'status_code': 200, 'data': templates})
 
         elif service == 'GetMenus':
@@ -381,7 +414,10 @@ class Administrator(APIView):
                 'is_active': {'$ne': False},
                 'mirror_ids': {'$in': [mirror_id, mirror['_id']]},
             }).sort('updated_at', -1):
-                template = menu_templates_collection.find_one({'_id': menu.get('template_id')})
+                tid = menu.get('template_id')
+                try: tid = ObjectId(tid) if isinstance(tid, str) and len(tid) == 24 else tid
+                except Exception: pass
+                template = menu_templates_collection.find_one({'_id': tid})
                 if not template:
                     continue
                 public_menus.append({'_id': str(menu['_id']), 'title': menu.get('title', 'Menu'),
@@ -430,11 +466,33 @@ class Administrator(APIView):
                 return Response({'status_code': 401, 'status_text': 'Please sign in.'}, status=401)
             template_id = str(request.data.get('template_id') or '')
             menu_data = request.data.get('data') if isinstance(request.data.get('data'), dict) else {}
+            custom_template = request.data.get('custom_template') if isinstance(request.data.get('custom_template'), dict) else None
+            if custom_template:
+                template_id = str(custom_template.get('_id') or '')
+                template_doc = {k: v for k, v in custom_template.items() if k != '_id'}
+                template_doc.update({'administrator_id': administrator['_id'], 'is_custom': True, 'layout': 'custom'})
+                if template_id:
+                    try:
+                        template_oid = ObjectId(template_id)
+                        existing = menu_templates_collection.find_one({'_id': template_oid, 'administrator_id': administrator['_id']})
+                        if existing:
+                            menu_templates_collection.update_one({'_id': template_oid}, {'$set': template_doc})
+                            template_id = str(template_oid)
+                        else:
+                            template_id = ''
+                    except Exception:
+                        template_id = ''
+                if not template_id:
+                    template_id = str(menu_templates_collection.insert_one(template_doc).inserted_id)
             menu_title = str(menu_data.get('title') or request.data.get('title') or '').strip()
             if not template_id or not menu_title:
                 return Response({'status_code': 400, 'status_text': 'Select a template and enter a menu title.'}, status=400)
             ensure_menu_templates()
-            template = menu_templates_collection.find_one({'_id': template_id})
+            try:
+                template_key = ObjectId(template_id) if len(template_id) == 24 else template_id
+            except Exception:
+                template_key = template_id
+            template = menu_templates_collection.find_one({'_id': template_key, '$or': [{'administrator_id': administrator['_id']}, {'administrator_id': {'$exists': False}}]})
             if not template:
                 return Response({'status_code': 404, 'status_text': 'Menu template not found.'}, status=404)
             now = datetime.now(timezone.utc)
@@ -478,7 +536,10 @@ class Administrator(APIView):
             menu = menus_collection.find_one({'_id': menu_id, 'administrator_id': administrator['_id'] if administrator else None})
             if not menu:
                 return Response({'status_code': 404, 'status_text': 'Menu not found.'}, status=404)
-            template = menu_templates_collection.find_one({'_id': menu.get('template_id')})
+            tid = menu.get('template_id')
+            try: tid = ObjectId(tid) if isinstance(tid, str) and len(tid) == 24 else tid
+            except Exception: pass
+            template = menu_templates_collection.find_one({'_id': tid})
             if not template:
                 return Response({'status_code': 404, 'status_text': 'Menu template not found.'}, status=404)
             try:
