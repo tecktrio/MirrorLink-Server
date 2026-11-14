@@ -58,15 +58,58 @@ def error_response(error, status):
     return Response({"status_text": error, "status_code": status}, status=status)
 
 
+def subscription_snapshot(remote, saved=None):
+    """Pick safe subscription fields used by the control panel and local status checks."""
+    saved = dict(saved or {})
+    fields = (
+        "status", "current_start", "current_end", "charge_at", "start_at",
+        "end_at", "ended_at", "paid_count", "remaining_count", "total_count",
+    )
+    for field in fields:
+        value = remote.get(field)
+        if value is not None:
+            saved[field] = value
+    return saved
+
+
 class Billing(APIView):
     """Create and verify the single MirrorLink recurring subscription."""
 
     def post(self, request):
         service = request.data.get("service")
         config = razorpay_config()
-        if not config:
+        if not config and service != "get_subscription":
             return error_response("Razorpay is not configured. Set RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET and RAZORPAY_PLAN_ID on the server.", 503)
-        key_id, key_secret, plan_id = config
+        key_id, key_secret, plan_id = config or ("", "", PLAN.get("plan_id", ""))
+
+        if service == "get_subscription":
+            admin = admin_from_key(request.data.get("login_key"))
+            if not admin:
+                return error_response("Please sign in to view subscription details.", 401)
+            saved = dict(admin.get("subscription", {}))
+            subscription_id = saved.get("razorpay_subscription_id")
+            if subscription_id and config:
+                try:
+                    remote = requests.get(
+                        f"{RAZORPAY_API}/subscriptions/{subscription_id}",
+                        auth=(key_id, key_secret), timeout=15,
+                    )
+                    if remote.ok:
+                        saved = subscription_snapshot(remote.json(), saved)
+                        administrators_collection.update_one(
+                            {"_id": admin["_id"]}, {"$set": {f"subscription.{key}": value for key, value in saved.items()}}
+                        )
+                    else:
+                        print(f"[Billing] Could not refresh subscription details: Razorpay returned {remote.status_code}", flush=True)
+                except requests.RequestException as exc:
+                    print(f"[Billing] Could not refresh subscription details: {exc}", flush=True)
+
+            return Response({
+                "status_code": 200,
+                "plan_active": saved.get("status") == "active" and bool(saved.get("plan_id")),
+                "plan": PLAN,
+                "subscription": saved,
+            })
 
         if service == "create_subscription":
             admin = admin_from_key(request.data.get("login_key"))
@@ -156,17 +199,20 @@ class Billing(APIView):
                 if not remote.ok:
                     return error_response("Payment signature was verified, but subscription status is not available yet.", 502)
                 remote_status = remote.json().get("status", "authenticated")
+                remote_data = remote.json()
+                snapshot = subscription_snapshot(remote_data, saved)
+                snapshot["status"] = remote_status
                 administrators_collection.update_one(
                     {"_id": admin["_id"], "subscription.razorpay_subscription_id": subscription_id},
-                    {"$set": {
-                        "subscription.status": remote_status,
-                        "subscription.razorpay_payment_id": payment_id,
-                        "subscription.verified_at": int(time.time()),
-                    }},
+                    {"$set": {**{f"subscription.{key}": value for key, value in snapshot.items()},
+                              "subscription.razorpay_payment_id": payment_id,
+                              "subscription.verified_at": int(time.time())}},
                 )
                 users_collection.update_one(
                     {"_id": admin["_id"], "subscription.razorpay_subscription_id": subscription_id},
-                    {"$set": {"subscription.status": remote_status, "subscription.razorpay_payment_id": payment_id, "subscription.verified_at": int(time.time())}},
+                    {"$set": {**{f"subscription.{key}": value for key, value in snapshot.items()},
+                              "subscription.razorpay_payment_id": payment_id,
+                              "subscription.verified_at": int(time.time())}},
                 )
                 return Response({"status_code": 200, "status_text": "Payment authorization verified.", "subscription_status": remote_status})
             except requests.RequestException:
@@ -195,17 +241,17 @@ class RazorpayWebhook(APIView):
             subscription_id = entity.get("id")
             status = entity.get("status")
             if subscription_id and status:
+                snapshot = subscription_snapshot(entity, {"status": status})
+                snapshot["status"] = status
+                subscription_updates = {f"subscription.{key}": value for key, value in snapshot.items()}
+                subscription_updates.update({"subscription.last_event": event_name, "subscription.updated_at": int(time.time())})
                 administrators_collection.update_one(
                     {"subscription.razorpay_subscription_id": subscription_id},
-                    {"$set": {
-                        "subscription.status": status,
-                        "subscription.last_event": event_name,
-                        "subscription.updated_at": int(time.time()),
-                    }},
+                    {"$set": subscription_updates},
                 )
                 users_collection.update_one(
                     {"subscription.razorpay_subscription_id": subscription_id},
-                    {"$set": {"subscription.status": status, "subscription.last_event": event_name, "subscription.updated_at": int(time.time())}},
+                    {"$set": subscription_updates},
                 )
             return Response({"status": "ok"})
         except (ValueError, TypeError):
