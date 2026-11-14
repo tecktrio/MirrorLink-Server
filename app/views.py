@@ -1165,7 +1165,7 @@ class Administrator(APIView):
                     'active_content_id': mirror.get('active_content_id'),
                     'active_content_index': mirror.get('active_content_index', 0),
                     'playback_state': mirror.get('playback_state') or 'playing',
-                    'is_active': mirror.get('is_active', True),
+                    'is_active': mirror.get('is_active', str(mirror.get('status', '')).lower() not in ('inactive', 'disabled')),
                     'last_active_timestamp': last_active,
                     'last_refresh_timestamp': mirror.get('last_refresh_timestamp', 0),
                     'sync_timestamp': mirror.get('sync_timestamp', 0),
