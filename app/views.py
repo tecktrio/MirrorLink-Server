@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import secrets
 import re
+import html as html_lib
 from datetime import datetime, timedelta, timezone
 from bson import ObjectId
 from django.conf import settings
@@ -14,7 +15,7 @@ from django.core.mail import EmailMultiAlternatives
 from django.contrib.auth.hashers import make_password, check_password
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from .models import administrators_collection, users_collection, plans_collection, mirror_collection, sites_collection, content_collection
+from .models import administrators_collection, users_collection, plans_collection, mirror_collection, sites_collection, content_collection, menu_templates_collection, menus_collection
 from .billing import PLAN, administrator_ids, count_administrator_mirrors, count_administrator_sites
 from s3_config import upload_file_to_s3, delete_file_from_s3
 
@@ -85,6 +86,125 @@ def serialize_doc(obj):
     if isinstance(obj, (list, tuple, set)):
         return [serialize_doc(v) for v in obj]
     return obj
+
+
+MENU_TEMPLATE_SEEDS = [
+    {
+        "_id": "classic-menu",
+        "name": "Classic Menu Board",
+        "description": "A warm, readable menu with clear sections and prices.",
+        "layout": "classic",
+        "background": "#f5f0e6",
+        "accent": "#9a4c2f",
+        "html_template": "<div class='menu classic'><header><p>{{eyebrow}}</p><h1>{{title}}</h1><h2>{{subtitle}}</h2></header><main>{{items}}</main><footer>{{footer}}</footer></div>",
+        "components": [
+            {"key": "eyebrow", "label": "Small heading", "type": "text", "default": "FRESH & LOCAL"},
+            {"key": "title", "label": "Menu title", "type": "text", "default": "Our Menu", "required": True},
+            {"key": "subtitle", "label": "Subtitle", "type": "text", "default": "Made with care"},
+            {"key": "accent", "label": "Accent color", "type": "color", "default": "#9a4c2f"},
+            {"key": "background", "label": "Background color", "type": "color", "default": "#f5f0e6"},
+            {"key": "items", "label": "Menu items", "type": "items", "required": True},
+            {"key": "footer", "label": "Footer note", "type": "text", "default": "Thank you for visiting"},
+        ],
+    },
+    {
+        "_id": "modern-menu",
+        "name": "Modern Grid",
+        "description": "A bold two-column display for cafes and quick service.",
+        "layout": "modern",
+        "background": "#111827",
+        "accent": "#f4c95d",
+        "html_template": "<div class='menu modern'><header><p>{{eyebrow}}</p><h1>{{title}}</h1><h2>{{subtitle}}</h2></header><main>{{items}}</main><footer>{{footer}}</footer></div>",
+        "components": [
+            {"key": "eyebrow", "label": "Small heading", "type": "text", "default": "TODAY'S SPECIALS"},
+            {"key": "title", "label": "Menu title", "type": "text", "default": "Cafe Menu", "required": True},
+            {"key": "subtitle", "label": "Subtitle", "type": "text", "default": "Coffee · Brunch · Treats"},
+            {"key": "accent", "label": "Accent color", "type": "color", "default": "#f4c95d"},
+            {"key": "background", "label": "Background color", "type": "color", "default": "#111827"},
+            {"key": "items", "label": "Menu items", "type": "items", "required": True},
+            {"key": "footer", "label": "Footer note", "type": "text", "default": "Ask us about today's offers"},
+        ],
+    },
+    {
+        "_id": "photo-menu",
+        "name": "Photo Feature Board",
+        "description": "Image-forward menu cards with room for item photos.",
+        "layout": "photo",
+        "background": "#fffaf2",
+        "accent": "#20735a",
+        "html_template": "<div class='menu photo'><header><p>{{eyebrow}}</p><h1>{{title}}</h1><h2>{{subtitle}}</h2></header><main>{{items}}</main><footer>{{footer}}</footer></div>",
+        "components": [
+            {"key": "eyebrow", "label": "Small heading", "type": "text", "default": "FROM OUR KITCHEN"},
+            {"key": "title", "label": "Menu title", "type": "text", "default": "Seasonal Picks", "required": True},
+            {"key": "subtitle", "label": "Subtitle", "type": "text", "default": "A few favorites"},
+            {"key": "accent", "label": "Accent color", "type": "color", "default": "#20735a"},
+            {"key": "background", "label": "Background color", "type": "color", "default": "#fffaf2"},
+            {"key": "items", "label": "Menu items", "type": "items", "required": True},
+            {"key": "footer", "label": "Footer note", "type": "text", "default": "Made fresh every day"},
+        ],
+    },
+]
+
+
+def ensure_menu_templates():
+    if menu_templates_collection.count_documents({}) == 0:
+        menu_templates_collection.insert_many(MENU_TEMPLATE_SEEDS)
+
+
+def render_menu_svg(menu, template, width=1920, height=1080):
+    """Render saved menu HTML into a self-contained SVG image for cropping/import."""
+    data = menu.get('data', {})
+    components = template.get('components', [])
+    def field_value(key, default=''):
+        component = next((item for item in components if item.get('key') == key), {})
+        return html_lib.escape(str(data.get(key, component.get('default', default)) or ''), quote=True)
+
+    def safe_color(key, default):
+        value = str(data.get(key, default))
+        return value if re.fullmatch(r'#[0-9a-fA-F]{6}', value) else default
+
+    items = data.get('items') if isinstance(data.get('items'), list) else []
+    accent = safe_color('accent', template.get('accent', '#9a4c2f'))
+    background = safe_color('background', template.get('background', '#f5f0e6'))
+    item_markup = []
+    for item in items[:40]:
+        if not isinstance(item, dict):
+            continue
+        name = html_lib.escape(str(item.get('name', '')), quote=True)
+        price = html_lib.escape(str(item.get('price', '')), quote=True)
+        description = html_lib.escape(str(item.get('description', '')), quote=True)
+        image_url = str(item.get('image_url', '')).strip()
+        image_markup = ''
+        if image_url.startswith(('https://', 'http://', 'data:image/')):
+            image_markup = f"<img src='{html_lib.escape(image_url, quote=True)}' style='width:90px;height:72px;object-fit:cover;border-radius:8px;margin-right:16px'/>"
+        item_markup.append(
+            f"<article>{image_markup}<div class='item-copy'><strong>{name}</strong>"
+            f"<span class='price'>{price}</span><p>{description}</p></div></article>"
+        )
+    template_html = template.get('html_template', MENU_TEMPLATE_SEEDS[0]['html_template'])
+    rendered = template_html.replace('{{eyebrow}}', field_value('eyebrow'))
+    rendered = rendered.replace('{{title}}', field_value('title', menu.get('title', 'Menu')))
+    rendered = rendered.replace('{{subtitle}}', field_value('subtitle'))
+    rendered = rendered.replace('{{footer}}', field_value('footer'))
+    rendered = rendered.replace('{{items}}', ''.join(item_markup))
+    css = f"""
+      * {{ box-sizing:border-box; }} html,body {{ margin:0;width:{width}px;height:{height}px;overflow:hidden; }}
+      body {{ font-family:Arial,sans-serif;background:{background};color:#161616; }}
+      .menu {{ width:{width}px;height:{height}px;padding:5.5% 7%;background:{background};overflow:hidden;display:flex;flex-direction:column; }}
+      .modern {{ background:{background};color:#fff; }} .photo {{ background:{background}; }}
+      header {{ text-align:center;border-bottom:2px solid {accent};padding-bottom:20px;margin-bottom:24px; }}
+      header p {{ color:{accent};font-size:20px;letter-spacing:5px;font-weight:700;margin:0 0 12px; }}
+      h1 {{ color:{accent};font-size:68px;line-height:1.05;margin:0 0 10px; }} h2 {{ font-size:24px;font-weight:400;margin:0;opacity:.75; }}
+      main {{ display:grid;grid-template-columns:1fr 1fr;gap:12px 34px;flex:1;align-content:start;overflow:hidden; }}
+      article {{ display:flex;align-items:center;min-height:104px;border-bottom:1px solid {accent}55;padding:8px 0; }}
+      .item-copy {{ flex:1;min-width:0; }} article strong {{ font-size:26px; }} article .price {{ float:right;color:{accent};font-weight:700;font-size:24px; }}
+      article p {{ margin:8px 0 0;opacity:.7;font-size:16px; }} footer {{ color:{accent};font-size:16px;text-align:center;padding-top:14px; }}
+    """
+    html_doc = f"<html xmlns='http://www.w3.org/1999/xhtml'><head><style>{css}</style></head><body>{rendered}</body></html>"
+    svg = (f"<svg xmlns='http://www.w3.org/2000/svg' xmlns:xhtml='http://www.w3.org/1999/xhtml' "
+           f"width='{width}' height='{height}' viewBox='0 0 {width} {height}'><foreignObject width='100%' height='100%'>{html_doc}</foreignObject></svg>")
+    encoded = base64.b64encode(svg.encode('utf-8')).decode('ascii')
+    return f'data:image/svg+xml;base64,{encoded}'
 
 
 class Administrator(APIView):
@@ -188,6 +308,86 @@ class Administrator(APIView):
             if not user:
                 return Response({'status_text': 'Please sign in.', 'status_code': 401}, status=401)
             return Response({'status_code': 200, 'plan_active': plan_is_active(user), 'subscription': user.get('subscription', {})})
+
+        elif service == 'GetMenuTemplates':
+            ensure_menu_templates()
+            templates = [serialize_doc(dict(item)) for item in menu_templates_collection.find({})]
+            return Response({'status_code': 200, 'data': templates})
+
+        elif service == 'GetMenus':
+            administrator = get_administrator(request.data.get('login_key'))
+            if not administrator:
+                return Response({'status_code': 401, 'status_text': 'Please sign in.'}, status=401)
+            menus = [serialize_doc(dict(item)) for item in menus_collection.find({'administrator_id': administrator['_id']}).sort('updated_at', -1)]
+            return Response({'status_code': 200, 'data': menus})
+
+        elif service == 'SaveMenu':
+            administrator = get_administrator(request.data.get('login_key'))
+            if not administrator:
+                return Response({'status_code': 401, 'status_text': 'Please sign in.'}, status=401)
+            template_id = str(request.data.get('template_id') or '')
+            menu_data = request.data.get('data') if isinstance(request.data.get('data'), dict) else {}
+            menu_title = str(menu_data.get('title') or request.data.get('title') or '').strip()
+            if not template_id or not menu_title:
+                return Response({'status_code': 400, 'status_text': 'Select a template and enter a menu title.'}, status=400)
+            ensure_menu_templates()
+            template = menu_templates_collection.find_one({'_id': template_id})
+            if not template:
+                return Response({'status_code': 404, 'status_text': 'Menu template not found.'}, status=404)
+            now = datetime.now(timezone.utc)
+            menu_id = request.data.get('menu_id')
+            if menu_id:
+                try:
+                    object_id = ObjectId(menu_id)
+                except Exception:
+                    return Response({'status_code': 400, 'status_text': 'Invalid menu id.'}, status=400)
+                result = menus_collection.update_one(
+                    {'_id': object_id, 'administrator_id': administrator['_id']},
+                    {'$set': {'template_id': template_id, 'title': menu_title, 'data': menu_data, 'updated_at': now}}
+                )
+                if not result.matched_count:
+                    return Response({'status_code': 404, 'status_text': 'Menu not found.'}, status=404)
+                saved_id = object_id
+            else:
+                saved_id = menus_collection.insert_one({
+                    'administrator_id': administrator['_id'], 'template_id': template_id,
+                    'title': menu_title, 'data': menu_data, 'created_at': now, 'updated_at': now,
+                }).inserted_id
+            return Response({'status_code': 200, 'menu_id': str(saved_id), 'status_text': 'Menu saved.'})
+
+        elif service == 'DeleteMenu':
+            administrator = get_administrator(request.data.get('login_key'))
+            try:
+                menu_id = ObjectId(request.data.get('menu_id'))
+            except Exception:
+                return Response({'status_code': 400, 'status_text': 'Invalid menu id.'}, status=400)
+            result = menus_collection.delete_one({'_id': menu_id, 'administrator_id': administrator['_id'] if administrator else None})
+            if not result.deleted_count:
+                return Response({'status_code': 404, 'status_text': 'Menu not found.'}, status=404)
+            return Response({'status_code': 200, 'status_text': 'Menu deleted.'})
+
+        elif service == 'RenderMenuPreview':
+            administrator = get_administrator(request.data.get('login_key'))
+            try:
+                menu_id = ObjectId(request.data.get('menu_id'))
+            except Exception:
+                return Response({'status_code': 400, 'status_text': 'Invalid menu id.'}, status=400)
+            menu = menus_collection.find_one({'_id': menu_id, 'administrator_id': administrator['_id'] if administrator else None})
+            if not menu:
+                return Response({'status_code': 404, 'status_text': 'Menu not found.'}, status=404)
+            template = menu_templates_collection.find_one({'_id': menu.get('template_id')})
+            if not template:
+                return Response({'status_code': 404, 'status_text': 'Menu template not found.'}, status=404)
+            try:
+                width = min(3840, max(320, int(request.data.get('width', 1920))))
+                height = min(2160, max(320, int(request.data.get('height', 1080))))
+            except (ValueError, TypeError):
+                width, height = 1920, 1080
+            return Response({
+                'status_code': 200,
+                'preview_url': render_menu_svg(menu, template, width, height),
+                'width': width, 'height': height,
+            })
 
         elif service == 'AddContent':      
             login_key = request.data.get('login_key')
@@ -419,11 +619,13 @@ class Administrator(APIView):
             content_ids = request.data.get('content_ids', [])
             administrator = get_administrator(login_key)
             if administrator and mirror_id:
+                owner_id = administrator.get('_id')
+                owned_query = {'administrator_id': {'$in': [owner_id, str(owner_id)]}}
                 mirror = None
                 try:
-                    mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id)})
+                    mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id), **owned_query})
                 except Exception:
-                    mirror = mirror_collection.find_one({'_id': mirror_id})
+                    mirror = mirror_collection.find_one({'_id': mirror_id, **owned_query})
                 
                 if mirror:
                     existing_contents = mirror.get('contents', [])
@@ -431,11 +633,15 @@ class Administrator(APIView):
                     updated_contents = list(existing_contents)
                     
                     for cid in content_ids:
+                        try:
+                            content_object_id = ObjectId(cid)
+                        except Exception:
+                            content_object_id = cid
+                        owned_content = content_collection.find_one({'_id': content_object_id, **owned_query})
+                        if not owned_content:
+                            continue
                         if str(cid) not in existing_str_ids:
-                            try:
-                                updated_contents.append(ObjectId(cid))
-                            except Exception:
-                                updated_contents.append(cid)
+                            updated_contents.append(content_object_id)
                             existing_str_ids.add(str(cid))
                     
                     mirror_collection.update_one(
@@ -960,7 +1166,15 @@ class Administrator(APIView):
             content_id = request.data.get('content_id')
             administrator = get_administrator(login_key)
             if administrator and content_id:
-                content = content_collection.find_one({'_id': ObjectId(content_id)})
+                try:
+                    content_object_id = ObjectId(content_id)
+                except Exception:
+                    return Response({'status_code': 400, 'status_text': 'Invalid content id'}, status=400)
+                owner_id = administrator.get('_id')
+                owner_query = {'administrator_id': {'$in': [owner_id, str(owner_id)]}}
+                content = content_collection.find_one({'_id': content_object_id, **owner_query})
+                if not content:
+                    return Response({'status_code': 404, 'status_text': 'Content not found'}, status=404)
                 if content and 'content_url' in content:
                     try:
                         delete_file_from_s3(content["content_url"])
@@ -973,7 +1187,8 @@ class Administrator(APIView):
                             os.remove(local_path)
                     except Exception:
                         pass
-                content_collection.delete_one({'_id': ObjectId(content_id)})
+                mirror_collection.update_many(owner_query, {'$pull': {'contents': content_object_id}})
+                content_collection.delete_one({'_id': content_object_id, **owner_query})
                 return Response({'status_code': 200, 'status_text': 'ok'})
             return Response({'status_code': 401, 'status_text': 'invalid key'}, status=401)
 

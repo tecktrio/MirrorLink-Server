@@ -30,6 +30,7 @@ class MirrorConductor:
         self.conductor_owner = f"{socket.gethostname()}:{os.getpid()}"
         self.lease_wait_logged = False
         self.last_published_content_id = None
+        self.last_published_cycle = None
 
     def _mqtt_connected(self, client, userdata, flags, rc, *extra):
         if rc == 0:
@@ -252,7 +253,7 @@ class MirrorConductor:
 
     def get_initial_state(self, mirror):
         contents = self.get_active_contents(mirror)
-        current_idx, remaining, _ = self.calculate_timeline_slot(contents, mirror)
+        current_idx, _, _ = self.calculate_timeline_slot(contents, mirror)
         self.current_index = current_idx
         return {
             'status_text': 'ok',
@@ -293,6 +294,7 @@ class MirrorConductor:
                     eligibility_status = {'status_code': 500, 'status_text': 'Subscribed account not found'}
                 if eligibility_status:
                     self.last_published_content_id = None
+                    self.last_published_cycle = None
                     last_eligibility_status = eligibility_status
                     if time.time() - last_status_publish >= 3:
                         self.publish('eligibility_status', eligibility_status, retain=True)
@@ -312,8 +314,10 @@ class MirrorConductor:
                     if active_contents and mirror.get('playback_state', 'playing') != 'paused':
                         index = max(0, min(self.current_index, len(active_contents) - 1))
                         self.last_published_content_id = str(active_contents[index].get('_id'))
+                        self.last_published_cycle = None
                     else:
                         self.last_published_content_id = None
+                        self.last_published_cycle = None
                     last_eligibility_status = None
 
                 contents = self.get_active_contents(mirror)
@@ -325,6 +329,7 @@ class MirrorConductor:
                     fresh_contents = self.get_active_contents(mirror)
                     self.broadcast('update_playlist', {'data': fresh_contents})
                     self.last_published_content_id = None
+                    self.last_published_cycle = None
                 else:
                     self.last_known_refresh = last_refresh
 
@@ -336,6 +341,7 @@ class MirrorConductor:
 
                 if not contents:
                     self.last_published_content_id = None
+                    self.last_published_cycle = None
                     self.broadcast('standby', {
                         'mirror_id': str(self.mirror_id),
                         'mirror_name': mirror.get('mirror_name', ''),
@@ -350,6 +356,19 @@ class MirrorConductor:
                 self.current_index = slot_idx
                 current_item = contents[self.current_index]
                 cid = str(current_item.get('_id'))
+                item_duration = max(2, int(mirror.get('content_durations', {}).get(
+                    cid, current_item.get('duration') or mirror.get('photo_duration', 5) or 5
+                )))
+                is_video = (
+                    'video' in str(current_item.get('content_format', '')).lower()
+                    or str(current_item.get('content_url', '')).lower().split('?')[0].endswith(('.mp4', '.webm', '.ogg', '.mov', '.m4v'))
+                )
+                timeline_cycle = (item_duration, int(now // item_duration)) if len(contents) == 1 else None
+                repeat_single_video = (
+                    len(contents) == 1 and is_video
+                    and self.last_published_cycle is not None
+                    and timeline_cycle != self.last_published_cycle
+                )
 
                 mirror_collection.update_one(
                     {'_id': self.mirror_id},
@@ -363,7 +382,7 @@ class MirrorConductor:
 
                 # Publish the requested content, not just its playlist index,
                 # so every topic subscriber can render the same item.
-                if cid != self.last_published_content_id:
+                if cid != self.last_published_content_id or repeat_single_video:
                     self.broadcast('slide_change', {
                         'index': self.current_index,
                         'content_id': cid,
@@ -374,13 +393,17 @@ class MirrorConductor:
                         'timestamp': now
                     })
                     self.last_published_content_id = cid
+                if len(contents) == 1:
+                    self.last_published_cycle = timeline_cycle
+                else:
+                    self.last_published_cycle = None
 
                 # Sleep until this slide's slot ends (or until admin interrupts)
                 # Keep the server's virtual playback clock aligned to actual
                 # video duration when metadata is available; configured photo
                 # durations remain the timing source for images.
-                # Wake periodically to renew the per-mirror lease without
-                # republishing the same content event.
+                # Wake periodically to renew the per-mirror lease. A one-video
+                # playlist emits another slide event at the next cycle boundary.
                 interrupted = self.interrupt_event.wait(timeout=max(0.5, min(15.0, remaining)))
                 if interrupted:
                     self.interrupt_event.clear()
