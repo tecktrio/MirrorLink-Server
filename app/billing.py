@@ -16,7 +16,7 @@ SOURCE_APP_NAME = os.environ.get("BIGBURRY_SOURCE_APP", "mirrorlink").strip() or
 PLAN = {
     "plan_id": "mirrorlink-business-monthly",
     "name": "MirrorLink Business",
-    "amount": 1.00,  # in INR
+    "amount": 18900.00,  # in INR
     "currency": "INR",
     "period": "monthly",
     "interval": 1,
@@ -29,6 +29,200 @@ plans_collection.update_one(
     {"$set": {**PLAN, "updated_at": int(time.time())}, "$setOnInsert": {"created_at": int(time.time())}},
     upsert=True
 )
+
+# Supported Country Database with standard currency ISO and display symbol
+COUNTRY_CATALOG = [
+    {"name": "India", "code": "IN", "currency": "INR", "symbol": "₹"},
+    {"name": "United States", "code": "US", "currency": "USD", "symbol": "$"},
+    {"name": "United Kingdom", "code": "GB", "currency": "GBP", "symbol": "£"},
+    {"name": "United Arab Emirates", "code": "AE", "currency": "AED", "symbol": "AED "},
+    {"name": "Saudi Arabia", "code": "SA", "currency": "SAR", "symbol": "SAR "},
+    {"name": "Qatar", "code": "QA", "currency": "QAR", "symbol": "QAR "},
+    {"name": "Kuwait", "code": "KW", "currency": "KWD", "symbol": "KWD "},
+    {"name": "Oman", "code": "OM", "currency": "OMR", "symbol": "OMR "},
+    {"name": "Bahrain", "code": "BH", "currency": "BHD", "symbol": "BHD "},
+    {"name": "Singapore", "code": "SG", "currency": "SGD", "symbol": "S$"},
+    {"name": "Canada", "code": "CA", "currency": "CAD", "symbol": "CA$"},
+    {"name": "Australia", "code": "AU", "currency": "AUD", "symbol": "A$"},
+    {"name": "Germany", "code": "DE", "currency": "EUR", "symbol": "€"},
+    {"name": "France", "code": "FR", "currency": "EUR", "symbol": "€"},
+    {"name": "Italy", "code": "IT", "currency": "EUR", "symbol": "€"},
+    {"name": "Spain", "code": "ES", "currency": "EUR", "symbol": "€"},
+    {"name": "Netherlands", "code": "NL", "currency": "EUR", "symbol": "€"},
+    {"name": "Switzerland", "code": "CH", "currency": "CHF", "symbol": "CHF "},
+    {"name": "Sweden", "code": "SE", "currency": "SEK", "symbol": "kr "},
+    {"name": "Norway", "code": "NO", "currency": "NOK", "symbol": "kr "},
+    {"name": "Denmark", "code": "DK", "currency": "DKK", "symbol": "kr "},
+    {"name": "Poland", "code": "PL", "currency": "PLN", "symbol": "zł "},
+    {"name": "Ireland", "code": "IE", "currency": "EUR", "symbol": "€"},
+    {"name": "New Zealand", "code": "NZ", "currency": "NZD", "symbol": "NZ$"},
+    {"name": "Japan", "code": "JP", "currency": "JPY", "symbol": "¥"},
+    {"name": "South Korea", "code": "KR", "currency": "KRW", "symbol": "₩"},
+    {"name": "China", "code": "CN", "currency": "CNY", "symbol": "¥"},
+    {"name": "Hong Kong", "code": "HK", "currency": "HKD", "symbol": "HK$"},
+    {"name": "Taiwan", "code": "TW", "currency": "TWD", "symbol": "NT$"},
+    {"name": "Malaysia", "code": "MY", "currency": "MYR", "symbol": "RM "},
+    {"name": "Indonesia", "code": "ID", "currency": "IDR", "symbol": "Rp "},
+    {"name": "Philippines", "code": "PH", "currency": "PHP", "symbol": "₱"},
+    {"name": "Thailand", "code": "TH", "currency": "THB", "symbol": "฿"},
+    {"name": "Vietnam", "code": "VN", "currency": "VND", "symbol": "₫"},
+    {"name": "South Africa", "code": "ZA", "currency": "ZAR", "symbol": "R "},
+    {"name": "Brazil", "code": "BR", "currency": "BRL", "symbol": "R$ "},
+    {"name": "Mexico", "code": "MX", "currency": "MXN", "symbol": "Mex$"},
+    {"name": "Turkey", "code": "TR", "currency": "TRY", "symbol": "₺"},
+    {"name": "Egypt", "code": "EG", "currency": "EGP", "symbol": "E£ "},
+    {"name": "Nigeria", "code": "NG", "currency": "NGN", "symbol": "₦"},
+    {"name": "Kenya", "code": "KE", "currency": "KES", "symbol": "KSh "},
+    {"name": "Bangladesh", "code": "BD", "currency": "BDT", "symbol": "৳"},
+    {"name": "Pakistan", "code": "PK", "currency": "PKR", "symbol": "₨ "},
+    {"name": "Sri Lanka", "code": "LK", "currency": "LKR", "symbol": "Rs "},
+    {"name": "Nepal", "code": "NP", "currency": "NPR", "symbol": "Rs "},
+    {"name": "Israel", "code": "IL", "currency": "ILS", "symbol": "₪"},
+    {"name": "Russia", "code": "RU", "currency": "RUB", "symbol": "₽"},
+    {"name": "Austria", "code": "AT", "currency": "EUR", "symbol": "€"},
+    {"name": "Belgium", "code": "BE", "currency": "EUR", "symbol": "€"},
+    {"name": "Portugal", "code": "PT", "currency": "EUR", "symbol": "€"},
+    {"name": "Finland", "code": "FI", "currency": "EUR", "symbol": "€"},
+    {"name": "Greece", "code": "GR", "currency": "EUR", "symbol": "€"},
+    {"name": "Czech Republic", "code": "CZ", "currency": "CZK", "symbol": "Kč "},
+    {"name": "Hungary", "code": "HU", "currency": "HUF", "symbol": "Ft "},
+    {"name": "Romania", "code": "RO", "currency": "RON", "symbol": "lei "},
+    {"name": "Bulgaria", "code": "BG", "currency": "BGN", "symbol": "лв "},
+    {"name": "Croatia", "code": "HR", "currency": "EUR", "symbol": "€"},
+    {"name": "Morocco", "code": "MA", "currency": "MAD", "symbol": "DH "},
+    {"name": "Ghana", "code": "GH", "currency": "GHS", "symbol": "GH₵ "},
+    {"name": "Jordan", "code": "JO", "currency": "JOD", "symbol": "JD "},
+    {"name": "Peru", "code": "PE", "currency": "PEN", "symbol": "S/ "},
+    {"name": "Ukraine", "code": "UA", "currency": "UAH", "symbol": "₴"},
+    {"name": "Kazakhstan", "code": "KZ", "currency": "KZT", "symbol": "₸"},
+]
+
+# Currency conversion rates cache in-memory (valid for 1 hour)
+RATES_CACHE = {
+    "timestamp": 0,
+    "rates": {},
+}
+
+
+def get_client_ip(request):
+    """Extract client IP handling forward headers."""
+    x_forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
+    if x_forwarded_for:
+        ip = x_forwarded_for.split(",")[0].strip()
+    else:
+        ip = request.META.get("REMOTE_ADDR", "").strip()
+    return ip
+
+
+def detect_client_country(request):
+    """Detect client country and currency from IP address using free open geo-lookup APIs."""
+    ip = get_client_ip(request)
+    # Check if local/private IP
+    is_private = not ip or ip.startswith("127.") or ip.startswith("10.") or ip.startswith("192.168.") or ip == "::1"
+
+    # Try ipapi.co
+    try:
+        url = "https://ipapi.co/json/" if is_private else f"https://ipapi.co/{ip}/json/"
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=3)
+        if r.ok:
+            data = r.json()
+            code = data.get("country_code")
+            name = data.get("country_name")
+            curr = data.get("currency")
+            if code and name:
+                return {"code": code.upper(), "name": name, "currency": curr}
+    except Exception:
+        pass
+
+    # Fallback to ip-api.com
+    try:
+        url = "http://ip-api.com/json/" if is_private else f"http://ip-api.com/json/{ip}"
+        r = requests.get(url, timeout=3)
+        if r.ok:
+            data = r.json()
+            if data.get("status") == "success":
+                return {
+                    "code": (data.get("countryCode") or "").upper(),
+                    "name": data.get("country"),
+                    "currency": None,
+                }
+    except Exception:
+        pass
+
+    # Default to India if detection fails
+    return {"code": "IN", "name": "India", "currency": "INR"}
+
+
+def fetch_exchange_rates():
+    """Fetch live currency exchange rates from open exchange APIs with INR as base."""
+    now = time.time()
+    if RATES_CACHE["rates"] and (now - RATES_CACHE["timestamp"]) < 3600:
+        return RATES_CACHE["rates"]
+
+    # 1. Primary: open.er-api.com (Free open exchange API, unlimited, updated live)
+    try:
+        r = requests.get("https://open.er-api.com/v6/latest/INR", timeout=6)
+        if r.ok:
+            data = r.json()
+            rates = data.get("rates")
+            if rates and isinstance(rates, dict):
+                RATES_CACHE["rates"] = rates
+                RATES_CACHE["timestamp"] = now
+                return rates
+    except Exception as exc:
+        print(f"[Currency] open.er-api fetch failed: {exc}", flush=True)
+
+    # 2. Fallback: Frankfurter Open API
+    try:
+        r = requests.get("https://api.frankfurter.dev/v1/latest?base=INR", timeout=6)
+        if r.ok:
+            data = r.json()
+            rates = data.get("rates", {})
+            rates["INR"] = 1.0
+            if rates:
+                RATES_CACHE["rates"] = rates
+                RATES_CACHE["timestamp"] = now
+                return rates
+    except Exception as exc:
+        print(f"[Currency] frankfurter fetch failed: {exc}", flush=True)
+
+    return RATES_CACHE["rates"] or {"INR": 1.0, "USD": 0.0106, "EUR": 0.0096, "GBP": 0.0080, "AED": 0.0389}
+
+
+def convert_inr_to_country(amount_inr, country_code=None, country_name=None):
+    """Convert an INR amount into the target country's currency."""
+    target = None
+    if country_code:
+        code_upper = country_code.strip().upper()
+        target = next((c for c in COUNTRY_CATALOG if c["code"] == code_upper), None)
+    if not target and country_name:
+        name_lower = country_name.strip().lower()
+        target = next((c for c in COUNTRY_CATALOG if c["name"].lower() == name_lower), None)
+
+    if not target:
+        target = {"name": country_name or "India", "code": country_code or "IN", "currency": "INR", "symbol": "₹"}
+
+    currency = target.get("currency", "INR")
+    symbol = target.get("symbol", f"{currency} ")
+    rates = fetch_exchange_rates()
+    rate = rates.get(currency)
+
+    if currency == "INR" or not rate:
+        converted_amount = round(amount_inr, 2)
+        rate = 1.0
+    else:
+        converted_amount = round(amount_inr * rate, 2)
+
+    return {
+        "country": target["name"],
+        "country_code": target["code"],
+        "currency": currency,
+        "symbol": symbol,
+        "rate": rate,
+        "converted_amount": converted_amount,
+        "base_amount": amount_inr,
+        "base_currency": "INR",
+    }
 
 
 def get_current_plan():
@@ -113,16 +307,53 @@ def activate_user_subscription(admin_id, order_id=None, payment_id=None, metadat
 
 
 class Billing(APIView):
-    """Handle subscription sessions and verification through BigBurry Payments."""
+    """Handle subscription sessions, currency conversion, and verification through BigBurry Payments."""
 
     def post(self, request):
         service = request.data.get("service")
 
-        if service == "get_plan":
+        if service == "get_countries":
+            return Response({
+                "status_code": 200,
+                "countries": COUNTRY_CATALOG,
+            })
+
+        if service == "convert_currency":
             current_plan = get_current_plan()
+            inr_amount = float(current_plan.get("amount", PLAN["amount"]))
+            country_code = request.data.get("country_code")
+            country_name = request.data.get("country_name")
+
+            if not country_code and not country_name:
+                detected = detect_client_country(request)
+                country_code = detected.get("code")
+                country_name = detected.get("name")
+
+            conversion = convert_inr_to_country(inr_amount, country_code, country_name)
             return Response({
                 "status_code": 200,
                 "plan": current_plan,
+                "conversion": conversion,
+                "countries": COUNTRY_CATALOG,
+            })
+
+        if service == "get_plan":
+            current_plan = get_current_plan()
+            inr_amount = float(current_plan.get("amount", PLAN["amount"]))
+            country_code = request.data.get("country_code")
+            country_name = request.data.get("country_name")
+
+            if not country_code and not country_name:
+                detected = detect_client_country(request)
+                country_code = detected.get("code")
+                country_name = detected.get("name")
+
+            conversion = convert_inr_to_country(inr_amount, country_code, country_name)
+            return Response({
+                "status_code": 200,
+                "plan": current_plan,
+                "conversion": conversion,
+                "countries": COUNTRY_CATALOG,
             })
 
         if service == "get_subscription":
@@ -148,10 +379,14 @@ class Billing(APIView):
                     {"$set": {"subscription.status": "expired"}}
                 )
 
+            inr_amount = float(current_plan.get("amount", PLAN["amount"]))
+            conversion = convert_inr_to_country(inr_amount, "IN", "India")
+
             return Response({
                 "status_code": 200,
                 "plan_active": is_active,
                 "plan": current_plan,
+                "conversion": conversion,
                 "subscription": saved,
             })
 
@@ -172,10 +407,15 @@ class Billing(APIView):
             customer_name = admin.get("username") or admin.get("email_id") or "MirrorLink User"
             customer_email = admin.get("email_id") or admin.get("email") or ""
 
+            # Check if user selected another country/currency or default INR
+            country_code = request.data.get("country_code")
+            inr_amount = float(current_plan.get("amount", PLAN["amount"]))
+
+            # Always record the charge amount
             payload = {
                 "sourceApp": source_app,
-                "amount": float(current_plan.get("amount", PLAN["amount"])),
-                "currency": current_plan.get("currency", PLAN["currency"]),
+                "amount": inr_amount,
+                "currency": "INR",
                 "productName": current_plan.get("name", PLAN["name"]),
                 "customerName": customer_name,
                 "customerEmail": customer_email,
@@ -314,4 +554,5 @@ class BigBurryWebhook(APIView):
 
 # Backward-compatible alias
 RazorpayWebhook = BigBurryWebhook
+
 
