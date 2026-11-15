@@ -1,5 +1,3 @@
-import hashlib
-import hmac
 import json
 import os
 import time
@@ -11,11 +9,14 @@ from rest_framework.views import APIView
 from .models import administrators_collection, users_collection, plans_collection
 from .models import mirror_collection, sites_collection
 
+DEFAULT_BIGBURRY_GATEWAY_URL = "https://ppgmyyxzrlemjgegnbou.supabase.co/functions/v1/payment-service"
+DEFAULT_BIGBURRY_PAYMENTS_WEB_URL = "https://payments.bigburry.com"
+SOURCE_APP_NAME = os.environ.get("BIGBURRY_SOURCE_APP", "mirrorlink").strip() or "mirrorlink"
 
 PLAN = {
-    "plan_id": os.environ.get("RAZORPAY_PLAN_ID", ""),
+    "plan_id": "mirrorlink-business-monthly",
     "name": "MirrorLink Business",
-    "amount": 2500000,
+    "amount": 12999.00,  # in INR
     "currency": "INR",
     "period": "monthly",
     "interval": 1,
@@ -23,17 +24,25 @@ PLAN = {
     "sites": 10,
     "mirrors_per_site": 50,
 }
-plans_collection.update_one({"name": PLAN["name"]}, {"$set": {**PLAN, "updated_at": int(time.time())}, "$setOnInsert": {"created_at": int(time.time())}}, upsert=True)
-RAZORPAY_API = "https://api.razorpay.com/v1"
+plans_collection.update_one(
+    {"name": PLAN["name"]},
+    {"$set": {**PLAN, "updated_at": int(time.time())}, "$setOnInsert": {"created_at": int(time.time())}},
+    upsert=True
+)
 
 
-def razorpay_config():
-    key_id = os.environ.get("RAZORPAY_KEY_ID", "").strip()
-    key_secret = os.environ.get("RAZORPAY_KEY_SECRET", "").strip()
-    plan_id = os.environ.get("RAZORPAY_PLAN_ID", "").strip()
-    if not key_id or not key_secret or not plan_id:
-        return None
-    return key_id, key_secret, plan_id
+def get_bigburry_config():
+    session_url = os.environ.get(
+        "BIGBURRY_PAYMENT_SERVICE_URL",
+        f"{DEFAULT_BIGBURRY_GATEWAY_URL}/create-session"
+    ).strip()
+    verify_url = os.environ.get(
+        "BIGBURRY_VERIFY_SERVICE_URL",
+        f"{DEFAULT_BIGBURRY_GATEWAY_URL}/verify-transaction"
+    ).strip()
+    web_url = os.environ.get("PAYMENTS_WEB_URL", DEFAULT_BIGBURRY_PAYMENTS_WEB_URL).strip().rstrip("/")
+    source_app = SOURCE_APP_NAME
+    return session_url, verify_url, web_url, source_app
 
 
 def admin_from_key(login_key):
@@ -58,55 +67,69 @@ def error_response(error, status):
     return Response({"status_text": error, "status_code": status}, status=status)
 
 
-def subscription_snapshot(remote, saved=None):
-    """Pick safe subscription fields used by the control panel and local status checks."""
-    saved = dict(saved or {})
-    fields = (
-        "status", "current_start", "current_end", "charge_at", "start_at",
-        "end_at", "ended_at", "paid_count", "remaining_count", "total_count",
+def activate_user_subscription(admin_id, order_id=None, payment_id=None, metadata=None):
+    """Mark an administrator account active for the current billing cycle."""
+    now = int(time.time())
+    one_month_later = now + (30 * 86400)
+    metadata = metadata or {}
+    
+    sub_data = {
+        "plan_name": PLAN["name"],
+        "plan_id": PLAN["plan_id"],
+        "status": "active",
+        "current_start": now,
+        "current_end": one_month_later,
+        "charge_at": one_month_later,
+        "source_app": SOURCE_APP_NAME,
+        "order_id": order_id or metadata.get("order_id"),
+        "payment_id": payment_id or metadata.get("payment_id"),
+        "last_payment_at": now,
+        "updated_at": now,
+    }
+    
+    administrators_collection.update_one(
+        {"_id": admin_id},
+        {"$set": {"subscription": sub_data}}
     )
-    for field in fields:
-        value = remote.get(field)
-        if value is not None:
-            saved[field] = value
-    return saved
+    users_collection.update_one(
+        {"_id": admin_id},
+        {"$set": {"subscription": sub_data}},
+        upsert=True
+    )
+    return sub_data
 
 
 class Billing(APIView):
-    """Create and verify the single MirrorLink recurring subscription."""
+    """Handle subscription sessions and verification through BigBurry Payments."""
 
     def post(self, request):
         service = request.data.get("service")
-        config = razorpay_config()
-        if not config and service != "get_subscription":
-            return error_response("Razorpay is not configured. Set RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET and RAZORPAY_PLAN_ID on the server.", 503)
-        key_id, key_secret, plan_id = config or ("", "", PLAN.get("plan_id", ""))
 
         if service == "get_subscription":
             admin = admin_from_key(request.data.get("login_key"))
             if not admin:
                 return error_response("Please sign in to view subscription details.", 401)
             saved = dict(admin.get("subscription", {}))
-            subscription_id = saved.get("razorpay_subscription_id")
-            if subscription_id and config:
-                try:
-                    remote = requests.get(
-                        f"{RAZORPAY_API}/subscriptions/{subscription_id}",
-                        auth=(key_id, key_secret), timeout=15,
-                    )
-                    if remote.ok:
-                        saved = subscription_snapshot(remote.json(), saved)
-                        administrators_collection.update_one(
-                            {"_id": admin["_id"]}, {"$set": {f"subscription.{key}": value for key, value in saved.items()}}
-                        )
-                    else:
-                        print(f"[Billing] Could not refresh subscription details: Razorpay returned {remote.status_code}", flush=True)
-                except requests.RequestException as exc:
-                    print(f"[Billing] Could not refresh subscription details: {exc}", flush=True)
+            is_active = saved.get("status") == "active" and bool(saved.get("plan_id"))
+
+            # Check if active subscription has passed current_end
+            current_end = saved.get("current_end")
+            if is_active and current_end and current_end < int(time.time()):
+                # Auto expire if past renewal window
+                saved["status"] = "expired"
+                is_active = False
+                administrators_collection.update_one(
+                    {"_id": admin["_id"]},
+                    {"$set": {"subscription.status": "expired"}}
+                )
+                users_collection.update_one(
+                    {"_id": admin["_id"]},
+                    {"$set": {"subscription.status": "expired"}}
+                )
 
             return Response({
                 "status_code": 200,
-                "plan_active": saved.get("status") == "active" and bool(saved.get("plan_id")),
+                "plan_active": is_active,
                 "plan": PLAN,
                 "subscription": saved,
             })
@@ -116,143 +139,157 @@ class Billing(APIView):
             if not admin:
                 return error_response("Sign in to your MirrorLink account before subscribing.", 401)
             saved = admin.get("subscription", {})
-            if saved.get("status") in ("active", "authenticated"):
-                return Response({"status_text": "Your MirrorLink subscription is already set up.", "status_code": 200, "subscription_status": saved.get("status")})
+            if saved.get("status") == "active" and (saved.get("current_end", 0) > int(time.time())):
+                return Response({
+                    "status_text": "Your MirrorLink subscription is already active.",
+                    "status_code": 200,
+                    "subscription_status": "active"
+                })
+
+            session_url, _, web_url, source_app = get_bigburry_config()
+            customer_name = admin.get("username") or admin.get("email_id") or "MirrorLink User"
+            customer_email = admin.get("email_id") or admin.get("email") or ""
+
+            payload = {
+                "sourceApp": source_app,
+                "amount": float(PLAN["amount"]),
+                "currency": PLAN["currency"],
+                "productName": PLAN["name"],
+                "customerName": customer_name,
+                "customerEmail": customer_email,
+            }
 
             try:
-                plan_response = requests.get(
-                    f"{RAZORPAY_API}/plans/{plan_id}",
-                    auth=(key_id, key_secret), timeout=15,
-                )
-                if not plan_response.ok:
-                    return error_response("The configured Razorpay plan could not be loaded. Check RAZORPAY_PLAN_ID.", 502)
-                plan = plan_response.json()
-                item = plan.get("item", {})
-                if (plan.get("period") != "monthly" or plan.get("interval") != 1
-                        or item.get("amount") != PLAN["amount"] or item.get("currency") != "INR"):
-                    return error_response("The Razorpay plan must be a monthly INR 25,000 plan.", 503)
+                resp = requests.post(session_url, json=payload, timeout=12)
+                resp.raise_for_status()
+                data = resp.json()
+                session_id = data.get("sessionId")
+                if not session_id:
+                    return error_response("BigBurry Payments did not return a valid session ID.", 502)
 
-                pending_id = saved.get("razorpay_subscription_id")
-                if saved.get("status") == "created" and pending_id:
-                    return Response({"status_code": 200, "key_id": key_id, "subscription_id": pending_id, "plan": PLAN})
-
-                payload = {
-                    "plan_id": plan_id,
-                    "total_count": PLAN["total_count"],
-                    "quantity": 1,
-                    "customer_notify": False,
-                    "expire_by": int(time.time()) + 1800,
-                    "notes": {
-                        "administrator_id": str(admin["_id"]),
-                        "plan_name": PLAN["name"],
-                    },
-                }
-                response = requests.post(
-                    f"{RAZORPAY_API}/subscriptions", json=payload,
-                    auth=(key_id, key_secret), timeout=15,
-                )
-                if not response.ok:
-                    return error_response("Razorpay could not create the subscription. Please try again.", 502)
-                subscription = response.json()
-                plans_collection.update_one({"name": PLAN["name"]}, {"$set": {**PLAN, "plan_id": plan_id, "updated_at": int(time.time())}, "$setOnInsert": {"created_at": int(time.time())}}, upsert=True)
-                administrators_collection.update_one(
-                    {"_id": admin["_id"]},
-                    {"$set": {"subscription": {
-                        "plan_name": PLAN["name"],
-                        "plan_id": plan_id,
-                        "razorpay_subscription_id": subscription["id"],
-                        "status": subscription.get("status", "created"),
-                        "created_at": int(time.time()),
-                    }}},
-                )
-                users_collection.update_one({"_id": admin["_id"]}, {"$set": {"subscription": {
-                    "plan_name": PLAN["name"], "plan_id": plan_id,
-                    "razorpay_subscription_id": subscription["id"],
-                    "status": subscription.get("status", "created"), "created_at": int(time.time()),
-                }}}, upsert=True)
-                return Response({"status_code": 200, "key_id": key_id, "subscription_id": subscription["id"], "plan": PLAN})
-            except requests.RequestException:
-                return error_response("Could not reach Razorpay. Please try again shortly.", 502)
+                checkout_url = f"{web_url}/?session_id={session_id}"
+                return Response({
+                    "status_code": 200,
+                    "session_id": session_id,
+                    "checkout_url": checkout_url,
+                    "plan": PLAN,
+                })
+            except requests.RequestException as e:
+                return error_response(f"Could not reach BigBurry payment server: {str(e)}", 502)
 
         if service == "verify_subscription":
             admin = admin_from_key(request.data.get("login_key"))
             if not admin:
                 return error_response("Sign in to your MirrorLink account before verifying payment.", 401)
-            saved = admin.get("subscription", {})
-            subscription_id = saved.get("razorpay_subscription_id")
-            payment_id = request.data.get("razorpay_payment_id", "")
-            signature = request.data.get("razorpay_signature", "")
-            if not subscription_id or not payment_id or not signature:
-                return error_response("The payment verification details are incomplete.", 400)
 
-            expected = hmac.new(
-                key_secret.encode(), f"{payment_id}|{subscription_id}".encode(), hashlib.sha256
-            ).hexdigest()
-            if not hmac.compare_digest(expected, signature):
-                return error_response("Razorpay payment verification failed.", 400)
+            order_id = request.data.get("order_id") or request.data.get("orderId")
+            payment_id = request.data.get("payment_id") or request.data.get("paymentId")
+            signature = request.data.get("signature") or request.data.get("razorpay_signature")
 
-            try:
-                remote = requests.get(
-                    f"{RAZORPAY_API}/subscriptions/{subscription_id}",
-                    auth=(key_id, key_secret), timeout=15,
-                )
-                if not remote.ok:
-                    return error_response("Payment signature was verified, but subscription status is not available yet.", 502)
-                remote_status = remote.json().get("status", "authenticated")
-                remote_data = remote.json()
-                snapshot = subscription_snapshot(remote_data, saved)
-                snapshot["status"] = remote_status
-                administrators_collection.update_one(
-                    {"_id": admin["_id"], "subscription.razorpay_subscription_id": subscription_id},
-                    {"$set": {**{f"subscription.{key}": value for key, value in snapshot.items()},
-                              "subscription.razorpay_payment_id": payment_id,
-                              "subscription.verified_at": int(time.time())}},
-                )
-                users_collection.update_one(
-                    {"_id": admin["_id"], "subscription.razorpay_subscription_id": subscription_id},
-                    {"$set": {**{f"subscription.{key}": value for key, value in snapshot.items()},
-                              "subscription.razorpay_payment_id": payment_id,
-                              "subscription.verified_at": int(time.time())}},
-                )
-                return Response({"status_code": 200, "status_text": "Payment authorization verified.", "subscription_status": remote_status})
-            except requests.RequestException:
-                return error_response("Payment signature was verified, but Razorpay status could not be checked. Please retry.", 502)
+            if not order_id or not payment_id:
+                return error_response("order_id and payment_id are required for verification.", 400)
+
+            # Replay defense check: verify order_id not consumed already by another user
+            existing = administrators_collection.find_one({"subscription.order_id": order_id})
+            if existing and existing["_id"] != admin["_id"]:
+                return error_response("This payment order has already been consumed by another account.", 409)
+
+            _, verify_url, _, source_app = get_bigburry_config()
+
+            # Local development mock support as specified in BigBurry payments guide
+            is_dev_mock = os.environ.get("ENV") != "production" and str(order_id).startswith("mock_order_")
+            verified = is_dev_mock
+
+            if not is_dev_mock:
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        verify_res = requests.get(
+                            f"{verify_url}?orderId={requests.utils.quote(str(order_id))}",
+                            timeout=10,
+                        )
+                        if verify_res.ok:
+                            verify_data = verify_res.json()
+                            if verify_data.get("status") == "success":
+                                resp_source = verify_data.get("sourceApp")
+                                if resp_source and resp_source != source_app:
+                                    return error_response(f"Cross-application payment mismatch: {resp_source}", 403)
+                                verified = True
+                                break
+                    except requests.RequestException:
+                        pass
+                    if attempt < max_retries - 1:
+                        time.sleep(1.5)
+
+            if not verified:
+                return error_response("Payment was not confirmed by the BigBurry payment gateway.", 402)
+
+            sub_data = activate_user_subscription(
+                admin["_id"],
+                order_id=order_id,
+                payment_id=payment_id,
+                metadata={"signature": signature}
+            )
+
+            return Response({
+                "status_code": 200,
+                "status_text": "Subscription payment confirmed and activated.",
+                "subscription_status": "active",
+                "subscription": sub_data,
+            })
 
         return error_response("Unknown billing service.", 400)
 
 
-class RazorpayWebhook(APIView):
-    """Keep local subscription status in step with Razorpay subscription events."""
+class BigBurryWebhook(APIView):
+    """Receive payment status notifications from BigBurry Payments Server."""
     authentication_classes = []
     permission_classes = []
 
     def post(self, request):
-        secret = os.environ.get("RAZORPAY_WEBHOOK_SECRET", "").strip()
-        signature = request.headers.get("X-Razorpay-Signature", "")
-        if not secret or not signature:
-            return error_response("Webhook signature is missing or not configured.", 400)
-        expected = hmac.new(secret.encode(), request.body, hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(expected, signature):
-            return error_response("Invalid webhook signature.", 400)
         try:
-            event = json.loads(request.body.decode("utf-8"))
-            event_name = event.get("event", "")
-            entity = event.get("payload", {}).get("subscription", {}).get("entity", {})
-            subscription_id = entity.get("id")
-            status = entity.get("status")
-            if subscription_id and status:
-                snapshot = subscription_snapshot(entity, {"status": status})
-                snapshot["status"] = status
-                subscription_updates = {f"subscription.{key}": value for key, value in snapshot.items()}
-                subscription_updates.update({"subscription.last_event": event_name, "subscription.updated_at": int(time.time())})
-                administrators_collection.update_one(
-                    {"subscription.razorpay_subscription_id": subscription_id},
-                    {"$set": subscription_updates},
-                )
-                users_collection.update_one(
-                    {"subscription.razorpay_subscription_id": subscription_id},
-                    {"$set": subscription_updates},
-                )
-            return Response({"status": "ok"})
-        except (ValueError, TypeError):
-            return error_response("Invalid webhook payload.", 400)
+            payload = request.data if isinstance(request.data, dict) else json.loads(request.body.decode("utf-8"))
+            event_type = payload.get("type") or payload.get("event")
+            status = payload.get("status")
+            order_id = payload.get("orderId") or payload.get("order_id")
+            payment_id = payload.get("paymentId") or payload.get("payment_id")
+            source_app = payload.get("sourceApp") or payload.get("source_app")
+            customer_email = payload.get("customerEmail") or payload.get("customer_email") or payload.get("email")
+
+            # Validate source application matches MirrorLink
+            if source_app and source_app != SOURCE_APP_NAME:
+                return error_response("Source app mismatch.", 403)
+
+            is_success = (
+                event_type in ("PAYMENT_SUCCESS", "payment.captured", "payment.success")
+                or status in ("success", "paid", "captured")
+            )
+
+            if is_success and (order_id or customer_email):
+                query = {}
+                if order_id:
+                    query = {"subscription.order_id": order_id}
+                elif customer_email:
+                    query = {"email_id": customer_email.lower().strip()}
+
+                admin = administrators_collection.find_one(query)
+                if not admin and customer_email:
+                    admin = administrators_collection.find_one({"email_id": customer_email.lower().strip()})
+
+                if admin:
+                    activate_user_subscription(
+                        admin["_id"],
+                        order_id=order_id,
+                        payment_id=payment_id,
+                        metadata=payload
+                    )
+                    return Response({"status": "ok", "message": "Subscription updated successfully"})
+
+            return Response({"status": "ignored", "message": "Webhook received"})
+        except Exception as exc:
+            return error_response(f"Webhook processing error: {str(exc)}", 400)
+
+
+# Backward-compatible alias
+RazorpayWebhook = BigBurryWebhook
+

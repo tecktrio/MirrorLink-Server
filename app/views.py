@@ -288,13 +288,21 @@ def render_custom_menu_svg(menu, template, width, height):
             text = str(value.get('text') or block.get('text') or block.get('holder_label') or '')
             try: size = max(8, min(120, int(block.get('font_size', 24))))
             except (ValueError, TypeError): size = 24
-            font = block.get('font_family') if block.get('font_family') in ('Arial', 'Georgia', 'Verdana', 'Tahoma') else 'Arial'
+            font = block.get('font_family') if block.get('font_family') in ('Arial', 'Georgia', 'Verdana', 'Tahoma', 'Trebuchet MS', 'Impact', 'Times New Roman', 'Courier New') else 'Arial'
             color = str(block.get('color') or '#171717')
             if not re.fullmatch(r'#[0-9a-fA-F]{6}', color): color = '#171717'
+            is_bold = bool(block.get('bold'))
+            is_italic = bool(block.get('italic'))
+            text_align = block.get('text_align') if block.get('text_align') in ('left', 'center', 'right') else 'left'
+            font_style_attr = " font-style='italic'" if is_italic else ''
+            anchor_attr = " text-anchor='middle'" if text_align == 'center' else (" text-anchor='end'" if text_align == 'right' else '')
+            text_x = x + (w / 2) if text_align == 'center' else (x + w if text_align == 'right' else x)
+            try: line_height = max(0.5, min(4.0, float(block.get('line_height', 1.2))))
+            except (ValueError, TypeError): line_height = 1.2
             lines = text.splitlines() or ['']
-            parts.append(f"<text x='{x}' y='{y + size}' fill='{color}' font-family='{font}' font-size='{size}' font-weight='{'700' if block.get('bold') else '400'}'>")
+            parts.append(f"<text x='{text_x}' y='{y + size}' fill='{color}' font-family='{font}' font-size='{size}' font-weight='{'700' if is_bold else '400'}'{font_style_attr}{anchor_attr}>")
             for line_i, line in enumerate(lines[:30]):
-                parts.append(f"<tspan x='{x}' dy='{'0' if line_i == 0 else size * 1.2}'>{esc(line)}</tspan>")
+                parts.append(f"<tspan x='{text_x}' dy='{'0' if line_i == 0 else round(size * line_height, 2)}'>{esc(line)}</tspan>")
             parts.append('</text>')
         parts.append('</g>')
     index = 0
@@ -374,14 +382,18 @@ def render_menu_html(menu, template):
                     fit = 'contain' if block.get('crop') == 'contain' else 'cover'
                     return f"<div style='{style}'><img src='{html_lib.escape(src, quote=True)}' style='width:100%;height:100%;object-fit:{fit}'/></div>"
                 return ''
-            font = block.get('font_family') if block.get('font_family') in ('Arial', 'Georgia', 'Verdana', 'Tahoma') else 'Arial'
+            font = block.get('font_family') if block.get('font_family') in ('Arial', 'Georgia', 'Verdana', 'Tahoma', 'Trebuchet MS', 'Impact', 'Times New Roman', 'Courier New') else 'Arial'
             try: size = max(8, min(120, int(block.get('font_size', 24) or 24)))
             except (ValueError, TypeError): size = 24
+            try: line_height = max(0.5, min(4.0, float(block.get('line_height', 1.2))))
+            except (ValueError, TypeError): line_height = 1.2
             weight = '700' if block.get('bold') else '400'
+            style_prop = 'italic' if block.get('italic') else 'normal'
+            align = block.get('text_align') if block.get('text_align') in ('left', 'center', 'right') else 'left'
             color = str(block.get('color', '#171717'))
             if not re.fullmatch(r'#[0-9a-fA-F]{6}', color): color = '#171717'
             value = html_lib.escape(str(value_block.get('text', '')), quote=True)
-            return f"<div style='{style}font:{weight} {size}px {font};color:{color};white-space:pre-wrap'>{value}</div>"
+            return f"<div style='{style}font-family:{font};font-size:{size}px;line-height:{line_height};font-weight:{weight};font-style:{style_prop};text-align:{align};color:{color};white-space:pre-wrap'>{value}</div>"
 
         for i, block in enumerate(template_blocks[:80]):
             if not isinstance(block, dict) or block.get('scope') == 'item':
@@ -687,6 +699,34 @@ class Administrator(APIView):
                 if not result.matched_count:
                     return Response({'status_code': 404, 'status_text': 'Custom template not found.'}, status=404)
                 saved_id = object_id
+
+                # Update artwork & background for all menus actively using this custom template
+                affected_menus = list(menus_collection.find({'template_id': str(object_id), 'administrator_id': administrator['_id']}))
+                template_for_render = {**template_doc, '_id': object_id}
+                for affected_menu in affected_menus:
+                    try:
+                        m_id = affected_menu['_id']
+                        old_img = affected_menu.get('artwork_s3_url') or affected_menu.get('image_url')
+                        m_data = affected_menu.get('data') if isinstance(affected_menu.get('data'), dict) else {}
+                        m_data['background'] = payload.get('background', '#ffffff')
+                        m_data['background_image'] = payload.get('background_image', '')
+                        artwork = store_menu_artwork({'_id': m_id, 'title': affected_menu.get('title', 'Menu'), 'data': m_data}, template_for_render, administrator['_id'], m_id)
+                        if artwork:
+                            menus_collection.update_one(
+                                {'_id': m_id},
+                                {'$set': {
+                                    'data.background': payload.get('background', '#ffffff'),
+                                    'data.background_image': payload.get('background_image', ''),
+                                    'image_data': artwork['data'],
+                                    'image_url': artwork['data'],
+                                    'artwork_s3_url': artwork['url'],
+                                    'artwork_version': MENU_ARTWORK_VERSION,
+                                    'updated_at': datetime.now(timezone.utc)
+                                }}
+                            )
+                            cleanup_previous_menu_artwork(old_img, administrator['_id'], m_id, artwork['url'])
+                    except Exception as sync_err:
+                        print(f"[Template sync error] {sync_err}")
             else:
                 template_doc['created_at'] = datetime.now(timezone.utc)
                 saved_id = menu_templates_collection.insert_one(template_doc).inserted_id
