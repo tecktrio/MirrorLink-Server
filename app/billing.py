@@ -16,7 +16,7 @@ SOURCE_APP_NAME = os.environ.get("BIGBURRY_SOURCE_APP", "mirrorlink").strip() or
 PLAN = {
     "plan_id": "mirrorlink-business-monthly",
     "name": "MirrorLink Business",
-    "amount": 12999.00,  # in INR
+    "amount": 1.00,  # in INR
     "currency": "INR",
     "period": "monthly",
     "interval": 1,
@@ -29,6 +29,19 @@ plans_collection.update_one(
     {"$set": {**PLAN, "updated_at": int(time.time())}, "$setOnInsert": {"created_at": int(time.time())}},
     upsert=True
 )
+
+
+def get_current_plan():
+    """Fetch the active plan from the MongoDB plans collection, or return default."""
+    try:
+        doc = plans_collection.find_one({"name": PLAN["name"]})
+        if doc:
+            clean = dict(doc)
+            clean.pop("_id", None)
+            return clean
+    except Exception as exc:
+        print(f"[Billing] Error reading plan from database: {exc}", flush=True)
+    return PLAN
 
 
 def get_bigburry_config():
@@ -105,7 +118,15 @@ class Billing(APIView):
     def post(self, request):
         service = request.data.get("service")
 
+        if service == "get_plan":
+            current_plan = get_current_plan()
+            return Response({
+                "status_code": 200,
+                "plan": current_plan,
+            })
+
         if service == "get_subscription":
+            current_plan = get_current_plan()
             admin = admin_from_key(request.data.get("login_key"))
             if not admin:
                 return error_response("Please sign in to view subscription details.", 401)
@@ -130,11 +151,12 @@ class Billing(APIView):
             return Response({
                 "status_code": 200,
                 "plan_active": is_active,
-                "plan": PLAN,
+                "plan": current_plan,
                 "subscription": saved,
             })
 
         if service == "create_subscription":
+            current_plan = get_current_plan()
             admin = admin_from_key(request.data.get("login_key"))
             if not admin:
                 return error_response("Sign in to your MirrorLink account before subscribing.", 401)
@@ -152,9 +174,9 @@ class Billing(APIView):
 
             payload = {
                 "sourceApp": source_app,
-                "amount": float(PLAN["amount"]),
-                "currency": PLAN["currency"],
-                "productName": PLAN["name"],
+                "amount": float(current_plan.get("amount", PLAN["amount"])),
+                "currency": current_plan.get("currency", PLAN["currency"]),
+                "productName": current_plan.get("name", PLAN["name"]),
                 "customerName": customer_name,
                 "customerEmail": customer_email,
             }
@@ -172,7 +194,7 @@ class Billing(APIView):
                     "status_code": 200,
                     "session_id": session_id,
                     "checkout_url": checkout_url,
-                    "plan": PLAN,
+                    "plan": current_plan,
                 })
             except requests.RequestException as e:
                 return error_response(f"Could not reach BigBurry payment server: {str(e)}", 502)
