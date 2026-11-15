@@ -96,6 +96,42 @@ def serialize_doc(obj):
     return obj
 
 
+def format_mirror_doc(mirror_doc):
+    """Normalize mirror database fields so UI and backend status are always synced."""
+    if not mirror_doc:
+        return mirror_doc
+    m = dict(mirror_doc)
+    
+    # 1. Active vs Inactive from DB
+    raw_status = str(m.get('status', '')).strip().lower()
+    is_active = m.get('is_active')
+    if is_active is None:
+        is_active = (raw_status not in ('inactive', 'disabled', 'false'))
+    else:
+        is_active = bool(is_active)
+    
+    m['is_active'] = is_active
+    m['status'] = 'active' if is_active else 'inactive'
+
+    # 2. Playback state (playing, paused)
+    playback_state = str(m.get('playback_state') or '').strip().lower()
+    if not playback_state:
+        playback_state = 'paused' if not is_active else 'playing'
+    m['playback_state'] = playback_state
+
+    # 3. Online status based on recent heartbeat/activity timestamp
+    current_time = time.time()
+    last_active = m.get('last_active_timestamp') or 0
+    try:
+        last_active = float(last_active)
+    except (ValueError, TypeError):
+        last_active = 0
+    
+    # Mirror is considered actively online if it refreshed or pinged within 35 seconds
+    m['is_online'] = is_active and bool(last_active and (current_time - last_active < 35))
+    return serialize_doc(m)
+
+
 MENU_TEMPLATE_SEEDS = [
     {
         "_id": "classic-menu",
@@ -1003,7 +1039,7 @@ class Administrator(APIView):
                 'administrator_id': {'$in': [administrator_id, str(administrator_id), ObjectId(administrator_id)]},
                 '$or': [{'site_id': None}, {'site_id': {'$exists': False}}]
             })
-            MyMirrors_list = [serialize_doc(dict(mirror)) for mirror in MyMirrors]
+            MyMirrors_list = [format_mirror_doc(mirror) for mirror in MyMirrors]
             return Response({'status_text': 'ok', 'status_code': 200, 'data': MyMirrors_list})
 
         elif service == 'GetMyMirrors':
@@ -1016,7 +1052,7 @@ class Administrator(APIView):
             MyMirrors = mirror_collection.find({
                 'administrator_id': {'$in': [administrator_id, str(administrator_id), ObjectId(administrator_id)]}
             })
-            MyMirrors_list = [serialize_doc(dict(mirror)) for mirror in MyMirrors]
+            MyMirrors_list = [format_mirror_doc(mirror) for mirror in MyMirrors]
             return Response({'status_text': 'Mirrors fetched Successfully', 'status_code': 200, 'data': MyMirrors_list})
 
         elif service == 'GetMySiteMirrors':
@@ -1037,7 +1073,7 @@ class Administrator(APIView):
                     query['site_id'] = site_id
 
             MyMirrors = mirror_collection.find(query)
-            MyMirrors_list = [serialize_doc(dict(mirror)) for mirror in MyMirrors]
+            MyMirrors_list = [format_mirror_doc(mirror) for mirror in MyMirrors]
             return Response({'status_text': 'Mirrors fetched Successfully', 'status_code': 200, 'data': MyMirrors_list})
 
         elif service == 'AssignMirrorToSite':
@@ -1473,8 +1509,7 @@ class Administrator(APIView):
             mirror_id = request.data.get('mirror_id')
             mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id)}) if mirror_id else None
             if mirror:
-                return Response({'status_text': 'ok', 'status_code': 200, 'data': serialize_doc(dict(mirror))})
-            return Response({'status_text': 'Not found', 'status_code': 404}, status=404)
+                return Response({'status_text': 'ok', 'status_code': 200, 'data': format_mirror_doc(mirror)})
             return Response({'status_text': 'Not found', 'status_code': 404}, status=404)
         
         elif service == 'AddSite':
