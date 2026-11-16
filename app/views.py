@@ -594,22 +594,27 @@ class Administrator(APIView):
             if not administrator:
                 return Response({'status_code': 401, 'status_text': 'Please sign in.'}, status=401)
             menus = []
+            # Cache templates lookup in memory to attach template_name and background without slow DB queries
+            templates_lookup = {}
+            for t in menu_templates_collection.find({
+                '$or': [{'administrator_id': administrator['_id']}, {'administrator_id': {'$exists': False}}]
+            }):
+                templates_lookup[str(t['_id'])] = t
+
             for item in menus_collection.find({'administrator_id': administrator['_id']}).sort('updated_at', -1):
                 item = dict(item)
                 item.setdefault('is_active', True)
                 item.setdefault('mirror_ids', [])
-                if not item.get('image_data') or item.get('artwork_version', 0) < MENU_ARTWORK_VERSION:
-                    old_image_url = item.get('artwork_s3_url') or item.get('image_url')
-                    template = menu_template_for(item)
-                    if template:
-                        artwork = store_menu_artwork(item, template, administrator['_id'], item['_id'])
-                        if artwork:
-                            item['image_data'] = artwork['data']
-                            item['artwork_s3_url'] = artwork['url']
-                            item['image_url'] = artwork['data']
-                            item['artwork_version'] = MENU_ARTWORK_VERSION
-                            menus_collection.update_one({'_id': item['_id']}, {'$set': {'image_data': artwork['data'], 'image_url': artwork['data'], 'artwork_s3_url': artwork['url'], 'artwork_version': MENU_ARTWORK_VERSION}})
-                            cleanup_previous_menu_artwork(old_image_url, administrator['_id'], item['_id'], artwork['url'])
+                # Attach template metadata for instant rendering in list view
+                tpl = templates_lookup.get(str(item.get('template_id')))
+                if tpl:
+                    item.setdefault('template_name', tpl.get('name', ''))
+                    item.setdefault('template_background', tpl.get('background', '#ffffff'))
+
+                # Use s3 url if present; do not send huge raw base64 data to keep payload light and fast
+                if item.get('artwork_s3_url'):
+                    item['image_url'] = item['artwork_s3_url']
+                item.pop('image_data', None)
                 menus.append(serialize_doc(item))
             return Response({'status_code': 200, 'data': menus})
 
