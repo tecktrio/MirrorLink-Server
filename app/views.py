@@ -322,13 +322,28 @@ def render_custom_menu_svg(menu, template, width, height):
                 parts.append(f"<image href='{esc(src)}' x='{x}' y='{y}' width='{w}' height='{h}' preserveAspectRatio='{fit}'/>")
         else:
             text = str(value.get('text') or block.get('text') or block.get('holder_label') or '')
-            try: size = max(8, min(120, int(block.get('font_size', 24))))
-            except (ValueError, TypeError): size = 24
+            try: raw_size = max(8, min(120, int(block.get('font_size', 24))))
+            except (ValueError, TypeError): raw_size = 24
+            # Scale proportionally so font size is identical relative to canvas width everywhere (base 1000px)
+            size = max(6, round(raw_size * (width / 1000.0), 2))
             font = block.get('font_family') if block.get('font_family') in ('Arial', 'Georgia', 'Verdana', 'Tahoma', 'Trebuchet MS', 'Impact', 'Times New Roman', 'Courier New') else 'Arial'
             color = str(block.get('color') or '#171717')
             if not re.fullmatch(r'#[0-9a-fA-F]{6}', color): color = '#171717'
             is_bold = bool(block.get('bold'))
             is_italic = bool(block.get('italic'))
+            is_underline = bool(block.get('underline'))
+            transform = block.get('text_transform') if block.get('text_transform') in ('uppercase', 'lowercase', 'capitalize') else 'none'
+            if transform == 'uppercase':
+                text = text.upper()
+            elif transform == 'lowercase':
+                text = text.lower()
+            elif transform == 'capitalize':
+                text = text.title()
+            try: letter_spacing = float(block.get('letter_spacing', 0) or 0)
+            except (ValueError, TypeError): letter_spacing = 0.0
+            scaled_letter_spacing = round(letter_spacing * (width / 1000.0), 2)
+            letter_spacing_attr = f" letter-spacing='{scaled_letter_spacing}px'" if scaled_letter_spacing != 0 else ''
+            text_decor_attr = " text-decoration='underline'" if is_underline else ''
             text_align = block.get('text_align') if block.get('text_align') in ('left', 'center', 'right') else 'left'
             font_style_attr = " font-style='italic'" if is_italic else ''
             anchor_attr = " text-anchor='middle'" if text_align == 'center' else (" text-anchor='end'" if text_align == 'right' else '')
@@ -336,7 +351,7 @@ def render_custom_menu_svg(menu, template, width, height):
             try: line_height = max(0.5, min(4.0, float(block.get('line_height', 1.2))))
             except (ValueError, TypeError): line_height = 1.2
             lines = text.splitlines() or ['']
-            parts.append(f"<text x='{text_x}' y='{y + size}' fill='{color}' font-family='{font}' font-size='{size}' font-weight='{'700' if is_bold else '400'}'{font_style_attr}{anchor_attr}>")
+            parts.append(f"<text x='{text_x}' y='{y + size}' fill='{color}' font-family='{font}' font-size='{size}' font-weight='{'700' if is_bold else '400'}'{font_style_attr}{anchor_attr}{letter_spacing_attr}{text_decor_attr}>")
             for line_i, line in enumerate(lines[:30]):
                 parts.append(f"<tspan x='{text_x}' dy='{'0' if line_i == 0 else round(size * line_height, 2)}'>{esc(line)}</tspan>")
             parts.append('</text>')
@@ -421,6 +436,8 @@ def render_menu_html(menu, template):
             font = block.get('font_family') if block.get('font_family') in ('Arial', 'Georgia', 'Verdana', 'Tahoma', 'Trebuchet MS', 'Impact', 'Times New Roman', 'Courier New') else 'Arial'
             try: size = max(8, min(120, int(block.get('font_size', 24) or 24)))
             except (ValueError, TypeError): size = 24
+            # Express font size as container query units (% of container width) based on 1000px design reference
+            font_size_cqw = round(size / 10.0, 3)
             try: line_height = max(0.5, min(4.0, float(block.get('line_height', 1.2))))
             except (ValueError, TypeError): line_height = 1.2
             weight = '700' if block.get('bold') else '400'
@@ -428,8 +445,14 @@ def render_menu_html(menu, template):
             align = block.get('text_align') if block.get('text_align') in ('left', 'center', 'right') else 'left'
             color = str(block.get('color', '#171717'))
             if not re.fullmatch(r'#[0-9a-fA-F]{6}', color): color = '#171717'
+            underline_css = 'text-decoration:underline;' if block.get('underline') else ''
+            transform = block.get('text_transform') if block.get('text_transform') in ('uppercase', 'lowercase', 'capitalize') else 'none'
+            transform_css = f'text-transform:{transform};' if transform != 'none' else ''
+            try: letter_spacing = float(block.get('letter_spacing', 0) or 0)
+            except (ValueError, TypeError): letter_spacing = 0.0
+            letter_spacing_css = f'letter-spacing:{round(letter_spacing / 10.0, 3)}cqw;' if letter_spacing != 0 else ''
             value = html_lib.escape(str(value_block.get('text', '')), quote=True)
-            return f"<div style='{style}font-family:{font};font-size:{size}px;line-height:{line_height};font-weight:{weight};font-style:{style_prop};text-align:{align};color:{color};white-space:pre-wrap'>{value}</div>"
+            return f"<div style='{style}font-family:{font};font-size:{font_size_cqw}cqw;line-height:{line_height};font-weight:{weight};font-style:{style_prop};text-align:{align};color:{color};white-space:pre-wrap;{underline_css}{transform_css}{letter_spacing_css}'>{value}</div>"
 
         for i, block in enumerate(template_blocks[:80]):
             if not isinstance(block, dict) or block.get('scope') == 'item':
@@ -457,7 +480,7 @@ def render_menu_html(menu, template):
         bg_style = f'background:{bg};'
         if bg_image.startswith(('https://', 'http://', 'data:image/')):
             bg_style += f"background-image:url('{html_lib.escape(bg_image, quote=True)}');background-size:cover;background-position:center;"
-        return f"<div style='position:relative;width:100%;height:100%;min-height:100%;overflow:hidden;{bg_style}'>{''.join(pieces)}</div>"
+        return f"<div style='position:relative;width:100%;height:100%;min-height:100%;overflow:hidden;container-type:inline-size;{bg_style}'>{''.join(pieces)}</div>"
     def text(key, default=''):
         component = next((item for item in template.get('components', []) if item.get('key') == key), {})
         return html_lib.escape(str(data.get(key, component.get('default', default)) or ''), quote=True)
@@ -1536,6 +1559,40 @@ class Administrator(APIView):
                 })
                 return Response({'status_text': 'ok', 'status_code': 200})
             return Response({'status_text': 'check key', 'status_code': 401}, status=401)
+
+        elif service == 'UpdateSite':
+            login_key = request.data.get('login_key')
+            site_id = request.data.get('site_id')
+            site_name = (request.data.get('site_name') or '').strip()
+            site_description = request.data.get('site_description', '')
+            if not site_id or not site_name:
+                return Response({'status_code': 400, 'status_text': 'site_id and site_name are required'}, status=400)
+
+            administrator = get_administrator(login_key)
+            if not administrator:
+                return Response({'status_code': 401, 'status_text': 'check key'}, status=401)
+
+            administrator_id = administrator.get('_id')
+            try:
+                site_obj_id = ObjectId(site_id)
+            except Exception:
+                site_obj_id = site_id
+
+            site = sites_collection.find_one({
+                '_id': site_obj_id,
+                'administrator_id': {'$in': [administrator_id, str(administrator_id), ObjectId(administrator_id)]}
+            })
+            if not site:
+                return Response({'status_code': 404, 'status_text': 'Site not found'}, status=404)
+
+            sites_collection.update_one(
+                {'_id': site['_id']},
+                {'$set': {
+                    'site_name': site_name,
+                    'site_description': site_description or ''
+                }}
+            )
+            return Response({'status_code': 200, 'status_text': 'Site updated successfully'})
                 
         elif service == 'AddMirror':
             login_key = request.data.get('login_key')
