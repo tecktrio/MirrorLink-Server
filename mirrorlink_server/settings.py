@@ -188,6 +188,8 @@ CORS_ALLOW_METHODS = list(default_methods) + [
 
 CSRF_TRUSTED_ORIGINS = [
     'https://*.bigburry.com',
+    'https://screenpilot.bigburry.com',
+    'http://screenpilot.bigburry.com',
     'https://mirrorlink.bigburry.com',
     'http://mirrorlink.bigburry.com',
     'http://localhost:3000',
