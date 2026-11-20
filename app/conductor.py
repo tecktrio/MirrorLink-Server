@@ -4,6 +4,7 @@ import queue
 import threading
 import os
 import socket
+from datetime import datetime
 from urllib.parse import urlparse
 from bson.objectid import ObjectId
 from app.models import administrators_collection, mirror_collection, content_collection
@@ -209,8 +210,72 @@ class MirrorConductor:
         disabled_set = {str(d) for d in mirror.get('disabled_contents', [])}
         content_durations = mirror.get('content_durations', {})
         photo_duration = mirror.get('photo_duration', 5)
+        
+        # Check if timeslots exist on mirror
+        timeslots = mirror.get('timeslots', [])
+        target_content_ids = mirror.get('contents', [])
+        
+        if timeslots and isinstance(timeslots, list):
+            now = datetime.now()
+            # 0=Monday, 6=Sunday -> map to standard abbreviations
+            day_map = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
+            current_day = day_map[now.weekday()]
+            current_minutes = now.hour * 60 + now.minute
+
+            matching_slots = []
+            default_slot = None
+
+            for slot in timeslots:
+                if not isinstance(slot, dict):
+                    continue
+                if slot.get('is_default') or slot.get('id') == 'default':
+                    default_slot = slot
+                    continue
+
+                days = [str(d).strip().lower() for d in slot.get('days', [])]
+                if days and current_day not in days:
+                    continue
+
+                start_str = slot.get('start_time')
+                end_str = slot.get('end_time')
+                if not start_str or not end_str:
+                    continue
+
+                try:
+                    sh, sm = map(int, start_str.split(':'))
+                    eh, em = map(int, end_str.split(':'))
+                    start_mins = sh * 60 + sm
+                    end_mins = eh * 60 + em
+
+                    # Calculate slot span (duration in minutes)
+                    span_mins = (end_mins - start_mins) % 1440
+                    if span_mins == 0:
+                        span_mins = 1440
+
+                    # Check if current time falls within slot
+                    is_in_slot = False
+                    if start_mins < end_mins:
+                        is_in_slot = start_mins <= current_minutes < end_mins
+                    else: # Overnight slot (e.g. 21:00 to 04:00)
+                        is_in_slot = current_minutes >= start_mins or current_minutes < end_mins
+
+                    if is_in_slot:
+                        matching_slots.append((span_mins, slot))
+                except Exception as ex:
+                    print(f"[Conductor] Error parsing slot time {slot}: {ex}")
+
+            if matching_slots:
+                # If multiple slots in same timing, priority is to the shortest time slot
+                matching_slots.sort(key=lambda x: x[0])
+                winning_slot = matching_slots[0][1]
+                target_content_ids = winning_slot.get('contents', [])
+            elif default_slot:
+                target_content_ids = default_slot.get('contents', [])
+            else:
+                target_content_ids = mirror.get('contents', [])
+
         content_list = []
-        for cid in mirror.get('contents', []):
+        for cid in target_content_ids:
             if str(cid) in disabled_set:
                 continue
             try:

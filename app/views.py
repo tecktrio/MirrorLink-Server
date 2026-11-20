@@ -1184,6 +1184,7 @@ class Administrator(APIView):
             login_key = request.data.get('login_key')
             mirror_id = request.data.get('mirror_id')
             content_ids = request.data.get('content_ids', [])
+            timeslot_id = request.data.get('timeslot_id', 'default')
             administrator = get_administrator(login_key)
             if administrator and mirror_id:
                 owner_id = administrator.get('_id')
@@ -1199,6 +1200,7 @@ class Administrator(APIView):
                     existing_str_ids = {str(c) for c in existing_contents}
                     updated_contents = list(existing_contents)
                     
+                    new_assigned = []
                     for cid in content_ids:
                         try:
                             content_object_id = ObjectId(cid)
@@ -1207,15 +1209,52 @@ class Administrator(APIView):
                         owned_content = content_collection.find_one({'_id': content_object_id, **owned_query})
                         if not owned_content:
                             continue
+                        new_assigned.append(content_object_id)
                         if str(cid) not in existing_str_ids:
                             updated_contents.append(content_object_id)
                             existing_str_ids.add(str(cid))
                     
+                    # Manage timeslots
+                    timeslots = mirror.get('timeslots')
+                    if not timeslots or not isinstance(timeslots, list):
+                        timeslots = [{
+                            'id': 'default',
+                            'name': 'Default Timeslot',
+                            'is_default': True,
+                            'start_time': None,
+                            'end_time': None,
+                            'days': ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'],
+                            'contents': [str(c) for c in existing_contents]
+                        }]
+
+                    slot_found = False
+                    for slot in timeslots:
+                        if str(slot.get('id')) == str(timeslot_id):
+                            slot_contents = [str(x) for x in slot.get('contents', [])]
+                            for ncid in new_assigned:
+                                if str(ncid) not in slot_contents:
+                                    slot_contents.append(str(ncid))
+                            slot['contents'] = slot_contents
+                            slot_found = True
+                            break
+                    if not slot_found and timeslots:
+                        # Append to default slot if specific slot not found
+                        default_slot = next((s for s in timeslots if s.get('is_default') or s.get('id') == 'default'), timeslots[0])
+                        d_contents = [str(x) for x in default_slot.get('contents', [])]
+                        for ncid in new_assigned:
+                            if str(ncid) not in d_contents:
+                                d_contents.append(str(ncid))
+                        default_slot['contents'] = d_contents
+
                     mirror_collection.update_one(
                         {'_id': mirror.get('_id')},
-                        {'$set': {'contents': updated_contents}}
+                        {'$set': {
+                            'contents': updated_contents,
+                            'timeslots': timeslots,
+                            'last_refresh_timestamp': time.time()
+                        }}
                     )
-                    return Response({'status_text': 'Contents added to mirror successfully', 'status_code': 200})
+                    return Response({'status_text': 'Contents added to mirror successfully', 'status_code': 200, 'timeslots': timeslots})
                 return Response({'status_text': 'Mirror not found', 'status_code': 404}, status=404)
             return Response({'status_text': 'Invalid key or mirror_id', 'status_code': 400}, status=400)
 
@@ -1223,6 +1262,7 @@ class Administrator(APIView):
             login_key = request.data.get('login_key')
             mirror_id = request.data.get('mirror_id')
             content_id = request.data.get('content_id')
+            timeslot_id = request.data.get('timeslot_id') # optional: if provided, remove from this timeslot only
             administrator = get_administrator(login_key)
             if administrator and mirror_id and content_id:
                 mirror = None
@@ -1232,6 +1272,19 @@ class Administrator(APIView):
                     mirror = mirror_collection.find_one({'_id': mirror_id})
                 
                 if mirror:
+                    timeslots = mirror.get('timeslots', [])
+                    if timeslot_id and timeslots:
+                        # Remove only from this timeslot
+                        for slot in timeslots:
+                            if str(slot.get('id')) == str(timeslot_id):
+                                slot['contents'] = [str(c) for c in slot.get('contents', []) if str(c) != str(content_id)]
+                        mirror_collection.update_one(
+                            {'_id': mirror['_id']},
+                            {'$set': {'timeslots': timeslots, 'last_refresh_timestamp': time.time()}}
+                        )
+                        return Response({'status_text': 'Content removed from timeslot successfully', 'status_code': 200, 'timeslots': timeslots})
+
+                    # If no timeslot_id specified, remove completely from mirror & all timeslots
                     current_contents = mirror.get('contents', [])
                     updated_contents = [
                         cid for cid in current_contents
@@ -1246,12 +1299,17 @@ class Administrator(APIView):
                     if str(content_id) in content_durations:
                         del content_durations[str(content_id)]
 
+                    if timeslots:
+                        for slot in timeslots:
+                            slot['contents'] = [str(c) for c in slot.get('contents', []) if str(c) != str(content_id)]
+
                     mirror_collection.update_one(
                         {'_id': mirror['_id']},
                         {'$set': {
                             'contents': updated_contents,
                             'disabled_contents': updated_disabled,
                             'content_durations': content_durations,
+                            'timeslots': timeslots,
                             'last_refresh_timestamp': time.time()
                         }}
                     )
@@ -1261,6 +1319,27 @@ class Administrator(APIView):
                         c_id_obj = ObjectId(content_id)
                     except Exception:
                         c_id_obj = content_id
+                    content_collection.delete_one({'_id': c_id_obj})
+
+                    # Broadcast reload event to active viewers and Virtual Screen
+                    try:
+                        from channels.layers import get_channel_layer
+                        from asgiref.sync import async_to_sync
+                        channel_layer = get_channel_layer()
+                        if channel_layer:
+                            msg = {
+                                'type': 'update.mirror',
+                                'data': {
+                                    'service': 'ReloadContents',
+                                    'mirror_id': str(mirror['_id']),
+                                    'timestamp': time.time()
+                                }
+                            }
+                            async_to_sync(channel_layer.group_send)("mirror_group", msg)
+                    except Exception as e:
+                        print("Error broadcasting reload event:", e)
+
+                    return Response({'status_text': 'Content removed successfully', 'status_code': 200, 'timeslots': timeslots})
                     content_collection.delete_one({'_id': c_id_obj})
 
                     # Broadcast reload event to active viewers and Virtual Screen
@@ -1378,30 +1457,60 @@ class Administrator(APIView):
             mirror_width = 1920
             mirror_height = 1080
             mirror_name = 'Mirror Display'
+            timeslots = []
             if mirror:
                 photo_duration = mirror.get('photo_duration', 5)
                 mirror_width = mirror.get('mirror_width', 1920)
                 mirror_height = mirror.get('mirror_height', 1080)
                 mirror_name = mirror.get('mirror_name', 'Mirror Display')
                 content_durations = mirror.get('content_durations', {})
-                if 'contents' in mirror and isinstance(mirror['contents'], list):
-                    disabled_set = {str(d) for d in mirror.get('disabled_contents', [])}
-                    for cid in mirror['contents']:
-                        try:
-                            content_doc = content_collection.find_one({"_id": ObjectId(cid)})
-                            if content_doc:
-                                c = dict(content_doc)
-                                if '_id' in c:
-                                    c['_id'] = str(c['_id'])
-                                if 'administrator_id' in c:
-                                    c['administrator_id'] = str(c['administrator_id'])
-                                if 'mirror_id' in c and c['mirror_id']:
-                                    c['mirror_id'] = str(c['mirror_id'])
-                                c['is_active'] = str(cid) not in disabled_set
-                                c['duration'] = int(content_durations.get(str(cid), photo_duration))
-                                contents.append(c)
-                        except Exception:
-                            pass
+                existing_contents = mirror.get('contents', []) if isinstance(mirror.get('contents'), list) else []
+                
+                # Ensure timeslots exists
+                raw_timeslots = mirror.get('timeslots')
+                if not raw_timeslots or not isinstance(raw_timeslots, list):
+                    raw_timeslots = [{
+                        'id': 'default',
+                        'name': 'Default Timeslot',
+                        'is_default': True,
+                        'start_time': None,
+                        'end_time': None,
+                        'days': ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'],
+                        'contents': [str(c) for c in existing_contents]
+                    }]
+                else:
+                    # Guarantee default slot is present
+                    has_default = any(s.get('is_default') or s.get('id') == 'default' for s in raw_timeslots if isinstance(s, dict))
+                    if not has_default:
+                        raw_timeslots.insert(0, {
+                            'id': 'default',
+                            'name': 'Default Timeslot',
+                            'is_default': True,
+                            'start_time': None,
+                            'end_time': None,
+                            'days': ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'],
+                            'contents': [str(c) for c in existing_contents]
+                        })
+                
+                timeslots = raw_timeslots
+                
+                disabled_set = {str(d) for d in mirror.get('disabled_contents', [])}
+                for cid in existing_contents:
+                    try:
+                        content_doc = content_collection.find_one({"_id": ObjectId(cid)})
+                        if content_doc:
+                            c = dict(content_doc)
+                            if '_id' in c:
+                                c['_id'] = str(c['_id'])
+                            if 'administrator_id' in c:
+                                c['administrator_id'] = str(c['administrator_id'])
+                            if 'mirror_id' in c and c['mirror_id']:
+                                c['mirror_id'] = str(c['mirror_id'])
+                            c['is_active'] = str(cid) not in disabled_set
+                            c['duration'] = int(content_durations.get(str(cid), photo_duration))
+                            contents.append(c)
+                    except Exception:
+                        pass
             return Response({
                 'status_text': 'ok',
                 'status_code': 200,
@@ -1409,8 +1518,117 @@ class Administrator(APIView):
                 'mirror_width': mirror_width,
                 'mirror_height': mirror_height,
                 'mirror_name': mirror_name,
+                'timeslots': timeslots,
                 'data': contents
             })
+
+        elif service == 'SaveTimeslot':
+            login_key = request.data.get('login_key')
+            mirror_id = request.data.get('mirror_id')
+            timeslot_data = request.data.get('timeslot')
+            administrator = get_administrator(login_key)
+            if not administrator or not mirror_id or not timeslot_data:
+                return Response({'status_text': 'Invalid request parameters', 'status_code': 400}, status=400)
+            
+            mirror = None
+            try:
+                mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id)})
+            except Exception:
+                mirror = mirror_collection.find_one({'_id': mirror_id})
+            
+            if not mirror:
+                return Response({'status_text': 'Mirror not found', 'status_code': 404}, status=404)
+            
+            timeslots = mirror.get('timeslots', [])
+            if not isinstance(timeslots, list):
+                timeslots = []
+            
+            slot_id = timeslot_data.get('id')
+            if not slot_id or slot_id == 'new':
+                slot_id = f"ts_{int(time.time()*1000)}"
+                timeslot_data['id'] = slot_id
+                timeslot_data['is_default'] = False
+                if 'contents' not in timeslot_data:
+                    timeslot_data['contents'] = []
+                timeslots.append(timeslot_data)
+            else:
+                updated = False
+                for idx, s in enumerate(timeslots):
+                    if str(s.get('id')) == str(slot_id):
+                        # Preserve existing contents if not explicitly overwritten
+                        if 'contents' not in timeslot_data:
+                            timeslot_data['contents'] = s.get('contents', [])
+                        # Ensure default flag is respected
+                        if s.get('is_default'):
+                            timeslot_data['is_default'] = True
+                        timeslots[idx] = {**s, **timeslot_data}
+                        updated = True
+                        break
+                if not updated:
+                    timeslots.append(timeslot_data)
+
+            mirror_collection.update_one(
+                {'_id': mirror['_id']},
+                {'$set': {'timeslots': timeslots, 'last_refresh_timestamp': time.time()}}
+            )
+            return Response({'status_text': 'Timeslot saved successfully', 'status_code': 200, 'timeslots': timeslots, 'timeslot': timeslot_data})
+
+        elif service == 'DeleteTimeslot':
+            login_key = request.data.get('login_key')
+            mirror_id = request.data.get('mirror_id')
+            timeslot_id = request.data.get('timeslot_id')
+            administrator = get_administrator(login_key)
+            if not administrator or not mirror_id or not timeslot_id:
+                return Response({'status_text': 'Invalid parameters', 'status_code': 400}, status=400)
+            
+            if str(timeslot_id) == 'default':
+                return Response({'status_text': 'Default timeslot cannot be deleted', 'status_code': 400}, status=400)
+            
+            mirror = None
+            try:
+                mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id)})
+            except Exception:
+                mirror = mirror_collection.find_one({'_id': mirror_id})
+            
+            if not mirror:
+                return Response({'status_text': 'Mirror not found', 'status_code': 404}, status=404)
+            
+            timeslots = [s for s in mirror.get('timeslots', []) if str(s.get('id')) != str(timeslot_id)]
+            mirror_collection.update_one(
+                {'_id': mirror['_id']},
+                {'$set': {'timeslots': timeslots, 'last_refresh_timestamp': time.time()}}
+            )
+            return Response({'status_text': 'Timeslot deleted successfully', 'status_code': 200, 'timeslots': timeslots})
+
+        elif service == 'UpdateTimeslotContentsOrder':
+            login_key = request.data.get('login_key')
+            mirror_id = request.data.get('mirror_id')
+            timeslot_id = request.data.get('timeslot_id', 'default')
+            ordered_content_ids = request.data.get('ordered_content_ids', [])
+            administrator = get_administrator(login_key)
+            if not administrator or not mirror_id:
+                return Response({'status_text': 'Invalid parameters', 'status_code': 400}, status=400)
+            
+            mirror = None
+            try:
+                mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id)})
+            except Exception:
+                mirror = mirror_collection.find_one({'_id': mirror_id})
+            
+            if not mirror:
+                return Response({'status_text': 'Mirror not found', 'status_code': 404}, status=404)
+            
+            timeslots = mirror.get('timeslots', [])
+            for s in timeslots:
+                if str(s.get('id')) == str(timeslot_id):
+                    s['contents'] = [str(c) for c in ordered_content_ids]
+                    break
+            
+            mirror_collection.update_one(
+                {'_id': mirror['_id']},
+                {'$set': {'timeslots': timeslots, 'last_refresh_timestamp': time.time()}}
+            )
+            return Response({'status_text': 'Timeslot contents order updated', 'status_code': 200, 'timeslots': timeslots})
 
         elif service in ['UpdatePhotoSpeed', 'SetPhotoSpeed', 'UpdateMirrorSpeed', 'SetMirrorSpeed']:
             login_key = request.data.get('login_key')
