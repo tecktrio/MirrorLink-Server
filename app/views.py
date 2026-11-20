@@ -1184,7 +1184,17 @@ class Administrator(APIView):
             login_key = request.data.get('login_key')
             mirror_id = request.data.get('mirror_id')
             content_ids = request.data.get('content_ids', [])
-            timeslot_id = request.data.get('timeslot_id', 'default')
+            timeslot_ids = request.data.get('timeslot_ids')
+            timeslot_id = request.data.get('timeslot_id')
+            if not timeslot_ids:
+                if timeslot_id:
+                    timeslot_ids = [timeslot_id]
+                else:
+                    timeslot_ids = ['default']
+            elif not isinstance(timeslot_ids, list):
+                timeslot_ids = [timeslot_ids]
+            timeslot_ids = [str(tid) for tid in timeslot_ids]
+
             administrator = get_administrator(login_key)
             if administrator and mirror_id:
                 owner_id = administrator.get('_id')
@@ -1227,19 +1237,33 @@ class Administrator(APIView):
                             'contents': [str(c) for c in existing_contents]
                         }]
 
-                    slot_found = False
+                    # Ensure default timeslot is present
+                    has_default = any(s.get('is_default') or str(s.get('id')) == 'default' for s in timeslots if isinstance(s, dict))
+                    if not has_default:
+                        timeslots.insert(0, {
+                            'id': 'default',
+                            'name': 'Default Timeslot',
+                            'is_default': True,
+                            'start_time': None,
+                            'end_time': None,
+                            'days': ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'],
+                            'contents': [str(c) for c in existing_contents]
+                        })
+
+                    # Add new contents to all selected timeslots
+                    matched_any = False
                     for slot in timeslots:
-                        if str(slot.get('id')) == str(timeslot_id):
+                        if str(slot.get('id')) in timeslot_ids:
                             slot_contents = [str(x) for x in slot.get('contents', [])]
                             for ncid in new_assigned:
                                 if str(ncid) not in slot_contents:
                                     slot_contents.append(str(ncid))
                             slot['contents'] = slot_contents
-                            slot_found = True
-                            break
-                    if not slot_found and timeslots:
-                        # Append to default slot if specific slot not found
-                        default_slot = next((s for s in timeslots if s.get('is_default') or s.get('id') == 'default'), timeslots[0])
+                            matched_any = True
+
+                    if not matched_any and timeslots:
+                        # Fallback to default slot
+                        default_slot = next((s for s in timeslots if s.get('is_default') or str(s.get('id')) == 'default'), timeslots[0])
                         d_contents = [str(x) for x in default_slot.get('contents', [])]
                         for ncid in new_assigned:
                             if str(ncid) not in d_contents:
