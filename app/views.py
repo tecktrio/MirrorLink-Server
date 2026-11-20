@@ -1481,12 +1481,14 @@ class Administrator(APIView):
             mirror_width = 1920
             mirror_height = 1080
             mirror_name = 'Mirror Display'
+            mirror_timezone = 'Asia/Kolkata'
             timeslots = []
             if mirror:
                 photo_duration = mirror.get('photo_duration', 5)
                 mirror_width = mirror.get('mirror_width', 1920)
                 mirror_height = mirror.get('mirror_height', 1080)
                 mirror_name = mirror.get('mirror_name', 'Mirror Display')
+                mirror_timezone = mirror.get('timezone', 'Asia/Kolkata')
                 content_durations = mirror.get('content_durations', {})
                 existing_contents = mirror.get('contents', []) if isinstance(mirror.get('contents'), list) else []
                 
@@ -1542,6 +1544,7 @@ class Administrator(APIView):
                 'mirror_width': mirror_width,
                 'mirror_height': mirror_height,
                 'mirror_name': mirror_name,
+                'timezone': mirror_timezone,
                 'timeslots': timeslots,
                 'data': contents
             })
@@ -1653,6 +1656,29 @@ class Administrator(APIView):
                 {'$set': {'timeslots': timeslots, 'last_refresh_timestamp': time.time()}}
             )
             return Response({'status_text': 'Timeslot contents order updated', 'status_code': 200, 'timeslots': timeslots})
+
+        elif service == 'UpdateMirrorTimezone':
+            login_key = request.data.get('login_key')
+            mirror_id = request.data.get('mirror_id')
+            timezone_str = request.data.get('timezone', 'Asia/Kolkata')
+            administrator = get_administrator(login_key)
+            if not administrator or not mirror_id:
+                return Response({'status_text': 'Invalid parameters', 'status_code': 400}, status=400)
+            
+            mirror = None
+            try:
+                mirror = mirror_collection.find_one({'_id': ObjectId(mirror_id)})
+            except Exception:
+                mirror = mirror_collection.find_one({'_id': mirror_id})
+            
+            if not mirror:
+                return Response({'status_text': 'Mirror not found', 'status_code': 404}, status=404)
+            
+            mirror_collection.update_one(
+                {'_id': mirror['_id']},
+                {'$set': {'timezone': timezone_str, 'last_refresh_timestamp': time.time()}}
+            )
+            return Response({'status_text': 'Mirror timezone updated', 'status_code': 200, 'timezone': timezone_str})
 
         elif service in ['UpdatePhotoSpeed', 'SetPhotoSpeed', 'UpdateMirrorSpeed', 'SetMirrorSpeed']:
             login_key = request.data.get('login_key')

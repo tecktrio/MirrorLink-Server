@@ -5,6 +5,7 @@ import threading
 import os
 import socket
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from urllib.parse import urlparse
 from bson.objectid import ObjectId
 from app.models import administrators_collection, mirror_collection, content_collection
@@ -216,7 +217,13 @@ class MirrorConductor:
         target_content_ids = mirror.get('contents', [])
         
         if timeslots and isinstance(timeslots, list):
-            now = datetime.now()
+            # Check mirror timezone; default to Asia/Kolkata or UTC if not specified
+            mirror_tz_str = mirror.get('timezone') or 'Asia/Kolkata'
+            try:
+                tz = ZoneInfo(mirror_tz_str)
+                now = datetime.now(tz)
+            except Exception:
+                now = datetime.now()
             # 0=Monday, 6=Sunday -> map to standard abbreviations
             day_map = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
             current_day = day_map[now.weekday()]
