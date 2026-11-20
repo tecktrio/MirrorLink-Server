@@ -14,6 +14,8 @@ import ipaddress
 import socket
 import urllib.parse
 import requests
+import subprocess
+import shutil
 from datetime import datetime, timedelta, timezone
 from bson import ObjectId
 from django.conf import settings
@@ -966,6 +968,41 @@ class Administrator(APIView):
             with open(file_path, 'wb') as file:
                 file.write(decoded_file_data)
             
+            # Optimize video files for Smart TVs (+faststart, H.264 web standard, yuv420p, capped bitrate)
+            if is_video:
+                ffmpeg_bin = shutil.which("ffmpeg")
+                if ffmpeg_bin:
+                    optimized_path = os.path.join('Contents', f"opt_{file_name}")
+                    cmd = [
+                        ffmpeg_bin, "-y", "-i", file_path,
+                        "-c:v", "libx264",
+                        "-pix_fmt", "yuv420p",
+                        "-profile:v", "high",
+                        "-level", "4.1",
+                        "-movflags", "+faststart",
+                        "-maxrate", "8000k",
+                        "-bufsize", "12000k",
+                        "-c:a", "aac",
+                        "-b:a", "128k",
+                        "-preset", "fast",
+                        optimized_path
+                    ]
+                    try:
+                        print(f"[Smart TV Optimizer] Running ffmpeg on {file_path}...")
+                        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+                        if result.returncode == 0 and os.path.exists(optimized_path) and os.path.getsize(optimized_path) > 0:
+                            os.replace(optimized_path, file_path)
+                            print(f"[Smart TV Optimizer] Video successfully optimized with +faststart: {file_path}")
+                        else:
+                            if os.path.exists(optimized_path):
+                                os.remove(optimized_path)
+                            print(f"[Smart TV Optimizer] ffmpeg optimization skipped/failed, using original: {result.stderr.decode('utf-8', errors='ignore')[-300:]}")
+                    except Exception as opt_err:
+                        print(f"[Smart TV Optimizer] ffmpeg exception: {opt_err}")
+                        if os.path.exists(optimized_path):
+                            try: os.remove(optimized_path)
+                            except Exception: pass
+
             # Upload to AWS S3 with explicit ContentType
             content_type = None
             if is_video:
