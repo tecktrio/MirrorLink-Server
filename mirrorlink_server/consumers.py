@@ -439,9 +439,14 @@ class MirrorConsumer(AsyncWebsocketConsumer):
                         break
 
         if mirror:
-            owner = administrators_collection.find_one({'_id': mirror.get('administrator_id')})
-            subscription = (owner or {}).get('subscription', {})
-            if subscription.get('status') != 'active' or not subscription.get('plan_id'):
+            administrator_id = mirror.get('administrator_id')
+            queries = [{'_id': administrator_id}, {'_id': str(administrator_id)}]
+            try:
+                queries.append({'_id': ObjectId(str(administrator_id))})
+            except Exception:
+                pass
+            owner = administrators_collection.find_one({'$or': queries})
+            if not owner:
                 await self.close(code=4402)
                 return
             self.mirror = mirror

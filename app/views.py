@@ -36,9 +36,31 @@ def get_administrator(login_key=None):
     return None
 
 
+def get_owner_by_admin_id(administrator_id):
+    if not administrator_id:
+        return None
+    queries = [{'_id': administrator_id}, {'_id': str(administrator_id)}]
+    try:
+        from bson import ObjectId
+        queries.append({'_id': ObjectId(str(administrator_id))})
+    except Exception:
+        pass
+    return administrators_collection.find_one({'$or': queries})
+
+
 def plan_is_active(user):
-    subscription = (user or {}).get('subscription', {})
-    return subscription.get('status') == 'active' and bool(subscription.get('plan_id'))
+    if not user:
+        return False
+    subscription = user.get('subscription', {})
+    status = subscription.get('status')
+    plan_id = subscription.get('plan_id')
+    # If explicitly active
+    if status == 'active' and plan_id:
+        return True
+    # The 0 / month plan is free forever and always active for all registered accounts
+    if not plan_id or plan_id == 'mirrorlink-free-monthly':
+        return True
+    return False
 
 
 def send_email_otp(email, purpose):
@@ -593,13 +615,23 @@ class Administrator(APIView):
                 "address_line_3": address_line_3,
                 "login_key": secrets.token_urlsafe(32),
                 "created_at": datetime.now(timezone.utc),
-                "subscription": {"status": "inactive"},
+                "subscription": {
+                    "plan_name": "ScreenPilot Free",
+                    "plan_id": "mirrorlink-free-monthly",
+                    "status": "active",
+                    "current_start": int(time.time()),
+                    "current_end": int(time.time()) + (3650 * 86400),
+                    "charge_at": None,
+                    "source_app": "mirrorlink",
+                    "order_id": "free_signup",
+                    "payment_id": "free_tier",
+                },
             }
             inserted = administrators_collection.insert_one(administrator_data)
             administrator_data['_id'] = inserted.inserted_id
             users_collection.delete_one({'email_id': email_id})
             users_collection.replace_one({'_id': inserted.inserted_id}, administrator_data, upsert=True)
-            return Response({'status_text': 'Registered Successfully', 'status_code': 200, 'login_key': administrator_data['login_key'], 'plan_active': False})
+            return Response({'status_text': 'Registered Successfully', 'status_code': 200, 'login_key': administrator_data['login_key'], 'plan_active': True})
 
         elif service == 'check_plan':
             user = get_administrator(request.data.get('login_key'))
@@ -1082,7 +1114,24 @@ class Administrator(APIView):
                 if duration:
                     update_fields[f'content_durations.{str(new_content_id)}'] = max(1, int(duration))
                 
+                # Also sync timeslots so default slot has the new content for conductor and viewers
+                timeslots = mirror.get('timeslots')
+                if timeslots and isinstance(timeslots, list):
+                    for slot in timeslots:
+                        if isinstance(slot, dict) and (slot.get('is_default') or str(slot.get('id')) == 'default'):
+                            slot_contents = [str(x) for x in slot.get('contents', [])]
+                            if str(new_content_id) not in slot_contents:
+                                slot_contents.append(str(new_content_id))
+                            slot['contents'] = slot_contents
+                    update_fields['timeslots'] = timeslots
+
                 mirror_collection.update_one({'_id': mirror['_id']}, {'$set': update_fields})
+
+                try:
+                    from app.conductor import get_or_create_conductor
+                    get_or_create_conductor(mirror['_id']).notify_state_change()
+                except Exception:
+                    pass
 
                 # Broadcast reload event to active viewers and Virtual Screen
                 try:
@@ -1300,6 +1349,11 @@ class Administrator(APIView):
                             'last_refresh_timestamp': time.time()
                         }}
                     )
+                    try:
+                        from app.conductor import get_or_create_conductor
+                        get_or_create_conductor(mirror['_id']).notify_state_change()
+                    except Exception:
+                        pass
                     return Response({'status_text': 'Contents added to mirror successfully', 'status_code': 200, 'timeslots': timeslots})
                 return Response({'status_text': 'Mirror not found', 'status_code': 404}, status=404)
             return Response({'status_text': 'Invalid key or mirror_id', 'status_code': 400}, status=400)
@@ -1369,6 +1423,11 @@ class Administrator(APIView):
 
                     # Broadcast reload event to active viewers and Virtual Screen
                     try:
+                        from app.conductor import get_or_create_conductor
+                        get_or_create_conductor(mirror['_id']).notify_state_change()
+                    except Exception:
+                        pass
+                    try:
                         from channels.layers import get_channel_layer
                         from asgiref.sync import async_to_sync
                         channel_layer = get_channel_layer()
@@ -1389,6 +1448,11 @@ class Administrator(APIView):
                     content_collection.delete_one({'_id': c_id_obj})
 
                     # Broadcast reload event to active viewers and Virtual Screen
+                    try:
+                        from app.conductor import get_or_create_conductor
+                        get_or_create_conductor(mirror['_id']).notify_state_change()
+                    except Exception:
+                        pass
                     try:
                         from channels.layers import get_channel_layer
                         from asgiref.sync import async_to_sync
@@ -2479,7 +2543,7 @@ class Mirror(APIView):
                         'mirror_active': False,
                         'mirror_id': str(mirror.get('_id')),
                     }, status=423)
-                owner = administrators_collection.find_one({'_id': mirror.get('administrator_id')})
+                owner = get_owner_by_admin_id(mirror.get('administrator_id'))
                 if not plan_is_active(owner):
                     return Response({'status_text': 'This mirror is in setup mode. Subscribe to activate live playback.', 'status_code': 402, 'plan_active': False, 'mirror_id': str(mirror.get('_id'))}, status=402)
                 current_time = time.time()
@@ -2601,7 +2665,7 @@ class Mirror(APIView):
             if not mirror:
                 return Response({'status_text': 'Mirror not found. Check mirror name.', 'status_code': 404}, status=404)
 
-            owner = administrators_collection.find_one({'_id': mirror.get('administrator_id')})
+            owner = get_owner_by_admin_id(mirror.get('administrator_id'))
             if mirror.get('is_active') is False or str(mirror.get('status', '')).lower() in ('inactive', 'disabled'):
                 return Response({'status_text': 'This mirror is inactive and cannot play content.', 'status_code': 423, 'mirror_active': False}, status=423)
             if not plan_is_active(owner):
@@ -2855,7 +2919,7 @@ class MirrorStreamView(View):
             resp['Access-Control-Allow-Origin'] = '*'
             return resp
 
-        owner = administrators_collection.find_one({'_id': mirror.get('administrator_id')})
+        owner = get_owner_by_admin_id(mirror.get('administrator_id'))
         if mirror.get('is_active') is False or str(mirror.get('status', '')).lower() in ('inactive', 'disabled'):
             resp = HttpResponse(
                 "event: error\ndata: " + json.dumps({'status_code': 423, 'status_text': 'This mirror is inactive.'}) + "\n\n",

@@ -24,13 +24,13 @@ FREE_PLAN = {
     "sites": 1,
     "mirrors_per_site": 1,
     "max_mirrors": 1,
-    "contents_per_mirror": 3,
-    "total_contents": 3,
-    "description": "Essential features to get started with 1 screen.",
+    "contents_per_mirror": None,
+    "total_contents": None,
+    "description": "Essential features to get started with 1 screen and unlimited content.",
     "benefits": [
         "1 site",
         "1 mirror",
-        "Up to 3 contents",
+        "Unlimited content on mirror",
         "Unlimited logins for mirror",
         "Menus, streaming, queue displays and ad management",
         "All core features included",
@@ -342,21 +342,12 @@ def get_user_plan(user):
                 return p
     if sub.get("status") == "active":
         return BUSINESS_PLAN
-    return None
+    return FREE_PLAN
 
 
 def get_user_plan_limits(user):
     """Return enforce limits for a user based on their subscription."""
-    plan = get_user_plan(user)
-    if not plan:
-        # Default / unactivated limit is same as Free plan
-        return {
-            "sites": 1,
-            "mirrors_per_site": 1,
-            "max_mirrors": 1,
-            "contents_per_mirror": 3,
-            "total_contents": 3,
-        }
+    plan = get_user_plan(user) or FREE_PLAN
     return {
         "sites": plan.get("sites", 1),
         "mirrors_per_site": plan.get("mirrors_per_site", 1),
@@ -504,7 +495,7 @@ class Billing(APIView):
             if not admin:
                 return error_response("Please sign in to view subscription details.", 401)
             saved = dict(admin.get("subscription", {}))
-            is_active = saved.get("status") == "active" and bool(saved.get("plan_id"))
+            is_active = (saved.get("status") == "active" and bool(saved.get("plan_id"))) or (not saved.get("plan_id") or saved.get("plan_id") == FREE_PLAN["plan_id"])
 
             # Check if active subscription has passed current_end
             current_end = saved.get("current_end")

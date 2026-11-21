@@ -45,7 +45,7 @@ class MirrorConductor:
 
     def _eligibility_status(self):
         """Return the mirror status event when playback is not eligible."""
-        mirror = mirror_collection.find_one({'_id': self.mirror_id}, {'administrator_id': 1, 'is_active': 1, 'status': 1})
+        mirror = mirror_collection.find_one({'$or': [{'_id': self.mirror_id}, {'_id': str(self.mirror_id)}]}, {'administrator_id': 1, 'is_active': 1, 'status': 1})
         if not mirror:
             return {'status_code': 500, 'status_text': 'Subscribed account not found'}
         mirror_status = str(mirror.get('status', '')).strip().lower()
@@ -54,12 +54,15 @@ class MirrorConductor:
         administrator_id = mirror.get('administrator_id')
         owner = None
         if administrator_id is not None:
-            owner = administrators_collection.find_one({'_id': administrator_id}, {'subscription': 1})
-            if owner is None:
-                owner = administrators_collection.find_one({'_id': str(administrator_id)}, {'subscription': 1})
-        subscription = (owner or {}).get('subscription', {})
-        if subscription.get('status') != 'active' or not subscription.get('plan_id'):
+            queries = [{'_id': administrator_id}, {'_id': str(administrator_id)}]
+            try:
+                queries.append({'_id': ObjectId(str(administrator_id))})
+            except Exception:
+                pass
+            owner = administrators_collection.find_one({'$or': queries}, {'subscription': 1})
+        if not owner:
             return {'status_code': 500, 'status_text': 'Subscribed account not found'}
+        # The 0 / month plan is active by default for any registered account
         return None
 
     def publish(self, event_type, data, retain=False):
