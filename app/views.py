@@ -955,6 +955,13 @@ class Administrator(APIView):
 
             is_video = file_extention in ['mp4', 'mov', 'webm', 'm4v', 'quicktime', 'mkv', 'avi'] or (content and 'video' in content[:50])
 
+            # Video uploading is temporarily disabled for system streaming optimization
+            if is_video:
+                return Response({
+                    'status_text': 'Video uploading is temporarily disabled for streaming optimization and system maintenance. Please upload image content (JPG, PNG, WEBP).',
+                    'status_code': 400
+                }, status=400)
+
             file_data = content.split(',')[1] if ',' in content else content
             decoded_file_data = base64.b64decode(file_data)
             os.makedirs('Contents', exist_ok=True)
