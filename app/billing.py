@@ -13,9 +13,33 @@ DEFAULT_BIGBURRY_GATEWAY_URL = "https://ppgmyyxzrlemjgegnbou.supabase.co/functio
 DEFAULT_BIGBURRY_PAYMENTS_WEB_URL = "https://payments.bigburry.com"
 SOURCE_APP_NAME = os.environ.get("BIGBURRY_SOURCE_APP", "mirrorlink").strip() or "mirrorlink"
 
-PLAN = {
+FREE_PLAN = {
+    "plan_id": "mirrorlink-free-monthly",
+    "name": "ScreenPilot Free",
+    "amount": 0.00,  # in INR
+    "currency": "INR",
+    "period": "monthly",
+    "interval": 1,
+    "total_count": None,
+    "sites": 1,
+    "mirrors_per_site": 1,
+    "max_mirrors": 1,
+    "contents_per_mirror": 3,
+    "total_contents": 3,
+    "description": "Essential features to get started with 1 screen.",
+    "benefits": [
+        "1 site",
+        "1 mirror",
+        "Up to 3 contents",
+        "Unlimited logins for mirror",
+        "Menus, streaming, queue displays and ad management",
+        "All core features included",
+    ],
+}
+
+BUSINESS_PLAN = {
     "plan_id": "mirrorlink-business-monthly",
-    "name": "MirrorLink Business",
+    "name": "ScreenPilot Business",
     "amount": 18900.00,  # in INR
     "currency": "INR",
     "period": "monthly",
@@ -23,12 +47,34 @@ PLAN = {
     "total_count": 120,
     "sites": 10,
     "mirrors_per_site": 50,
+    "max_mirrors": 500,
+    "contents_per_mirror": None,
+    "total_contents": None,
+    "description": "Full ScreenPilot toolkit ready to scale with your business.",
+    "benefits": [
+        "Up to 10 sites",
+        "Up to 50 mirrors at each site",
+        "Unlimited content on every mirror",
+        "Unlimited logins for every mirror",
+        "Menus, streaming, queue displays and ad management",
+        "All core features included",
+    ],
 }
-plans_collection.update_one(
-    {"name": PLAN["name"]},
-    {"$set": {**PLAN, "updated_at": int(time.time())}, "$setOnInsert": {"created_at": int(time.time())}},
-    upsert=True
-)
+
+PLANS = [FREE_PLAN, BUSINESS_PLAN]
+
+# Backward compatibility alias
+PLAN = BUSINESS_PLAN
+
+for p in PLANS:
+    try:
+        plans_collection.update_one(
+            {"plan_id": p["plan_id"]},
+            {"$set": {**p, "updated_at": int(time.time())}, "$setOnInsert": {"created_at": int(time.time())}},
+            upsert=True
+        )
+    except Exception as exc:
+        print(f"[Billing] Error upserting plan {p['plan_id']}: {exc}", flush=True)
 
 # Supported Country Database with standard currency ISO and display symbol
 COUNTRY_CATALOG = [
@@ -226,16 +272,98 @@ def convert_inr_to_country(amount_inr, country_code=None, country_name=None):
 
 
 def get_current_plan():
-    """Fetch the active plan from the MongoDB plans collection, or return default."""
+    """Fetch the active business plan from the MongoDB plans collection, or return default."""
     try:
-        doc = plans_collection.find_one({"name": PLAN["name"]})
+        doc = plans_collection.find_one({"plan_id": BUSINESS_PLAN["plan_id"]}) or plans_collection.find_one({"name": BUSINESS_PLAN["name"]})
         if doc:
             clean = dict(doc)
             clean.pop("_id", None)
             return clean
     except Exception as exc:
         print(f"[Billing] Error reading plan from database: {exc}", flush=True)
-    return PLAN
+    return BUSINESS_PLAN
+
+
+def get_plan_by_id(plan_id):
+    """Retrieve plan by id or name from memory or DB."""
+    if not plan_id:
+        return None
+    for p in PLANS:
+        if p.get("plan_id") == plan_id or p.get("name") == plan_id:
+            return p
+    try:
+        doc = plans_collection.find_one({"$or": [{"plan_id": plan_id}, {"name": plan_id}]})
+        if doc:
+            clean = dict(doc)
+            clean.pop("_id", None)
+            return clean
+    except Exception:
+        pass
+    return None
+
+
+def get_all_plans():
+    """Return all available plans."""
+    db_plans = []
+    try:
+        cursor = plans_collection.find({})
+        for doc in cursor:
+            clean = dict(doc)
+            clean.pop("_id", None)
+            db_plans.append(clean)
+    except Exception:
+        pass
+
+    if db_plans:
+        plan_map = {p.get("plan_id"): p for p in db_plans if p.get("plan_id")}
+        result = []
+        for default_p in PLANS:
+            p_id = default_p["plan_id"]
+            if p_id in plan_map:
+                result.append({**default_p, **plan_map[p_id]})
+            else:
+                result.append(default_p)
+        return result
+    return list(PLANS)
+
+
+def get_user_plan(user):
+    """Resolve active subscription plan for a given administrator/user."""
+    sub = (user or {}).get("subscription", {})
+    plan_id = sub.get("plan_id")
+    plan_name = sub.get("plan_name")
+    if plan_id:
+        found = get_plan_by_id(plan_id)
+        if found:
+            return found
+    if plan_name:
+        for p in PLANS:
+            if p.get("name") == plan_name:
+                return p
+    if sub.get("status") == "active":
+        return BUSINESS_PLAN
+    return None
+
+
+def get_user_plan_limits(user):
+    """Return enforce limits for a user based on their subscription."""
+    plan = get_user_plan(user)
+    if not plan:
+        # Default / unactivated limit is same as Free plan
+        return {
+            "sites": 1,
+            "mirrors_per_site": 1,
+            "max_mirrors": 1,
+            "contents_per_mirror": 3,
+            "total_contents": 3,
+        }
+    return {
+        "sites": plan.get("sites", 1),
+        "mirrors_per_site": plan.get("mirrors_per_site", 1),
+        "max_mirrors": plan.get("max_mirrors") or (plan.get("sites", 1) * plan.get("mirrors_per_site", 1)),
+        "contents_per_mirror": plan.get("contents_per_mirror"),
+        "total_contents": plan.get("total_contents"),
+    }
 
 
 def get_bigburry_config():
@@ -274,15 +402,16 @@ def error_response(error, status):
     return Response({"status_text": error, "status_code": status}, status=status)
 
 
-def activate_user_subscription(admin_id, order_id=None, payment_id=None, metadata=None):
+def activate_user_subscription(admin_id, plan=None, order_id=None, payment_id=None, metadata=None):
     """Mark an administrator account active for the current billing cycle."""
     now = int(time.time())
     one_month_later = now + (30 * 86400)
     metadata = metadata or {}
-    
+    chosen_plan = plan or BUSINESS_PLAN
+
     sub_data = {
-        "plan_name": PLAN["name"],
-        "plan_id": PLAN["plan_id"],
+        "plan_name": chosen_plan["name"],
+        "plan_id": chosen_plan["plan_id"],
         "status": "active",
         "current_start": now,
         "current_end": one_month_later,
@@ -319,8 +448,9 @@ class Billing(APIView):
             })
 
         if service == "convert_currency":
-            current_plan = get_current_plan()
-            inr_amount = float(current_plan.get("amount", PLAN["amount"]))
+            plan_id = request.data.get("plan_id")
+            current_plan = get_plan_by_id(plan_id) if plan_id else get_current_plan()
+            inr_amount = float(current_plan.get("amount", BUSINESS_PLAN["amount"]))
             country_code = request.data.get("country_code")
             country_name = request.data.get("country_name")
 
@@ -330,16 +460,23 @@ class Billing(APIView):
                 country_name = detected.get("name")
 
             conversion = convert_inr_to_country(inr_amount, country_code, country_name)
+            all_plans = get_all_plans()
+            for p in all_plans:
+                p_amt = float(p.get("amount", 0))
+                p["conversion"] = convert_inr_to_country(p_amt, country_code, country_name)
+
             return Response({
                 "status_code": 200,
                 "plan": current_plan,
+                "plans": all_plans,
                 "conversion": conversion,
                 "countries": COUNTRY_CATALOG,
             })
 
         if service == "get_plan":
-            current_plan = get_current_plan()
-            inr_amount = float(current_plan.get("amount", PLAN["amount"]))
+            plan_id = request.data.get("plan_id")
+            current_plan = get_plan_by_id(plan_id) if plan_id else get_current_plan()
+            inr_amount = float(current_plan.get("amount", BUSINESS_PLAN["amount"]))
             country_code = request.data.get("country_code")
             country_name = request.data.get("country_name")
 
@@ -349,15 +486,20 @@ class Billing(APIView):
                 country_name = detected.get("name")
 
             conversion = convert_inr_to_country(inr_amount, country_code, country_name)
+            all_plans = get_all_plans()
+            for p in all_plans:
+                p_amt = float(p.get("amount", 0))
+                p["conversion"] = convert_inr_to_country(p_amt, country_code, country_name)
+
             return Response({
                 "status_code": 200,
                 "plan": current_plan,
+                "plans": all_plans,
                 "conversion": conversion,
                 "countries": COUNTRY_CATALOG,
             })
 
         if service == "get_subscription":
-            current_plan = get_current_plan()
             admin = admin_from_key(request.data.get("login_key"))
             if not admin:
                 return error_response("Please sign in to view subscription details.", 401)
@@ -367,40 +509,77 @@ class Billing(APIView):
             # Check if active subscription has passed current_end
             current_end = saved.get("current_end")
             if is_active and current_end and current_end < int(time.time()):
-                # Auto expire if past renewal window
-                saved["status"] = "expired"
-                is_active = False
-                administrators_collection.update_one(
-                    {"_id": admin["_id"]},
-                    {"$set": {"subscription.status": "expired"}}
-                )
-                users_collection.update_one(
-                    {"_id": admin["_id"]},
-                    {"$set": {"subscription.status": "expired"}}
-                )
+                # Free plan auto-renews
+                plan_id = saved.get("plan_id")
+                plan_obj = get_plan_by_id(plan_id)
+                if plan_obj and float(plan_obj.get("amount", 0)) == 0:
+                    saved = activate_user_subscription(
+                        admin["_id"],
+                        plan=plan_obj,
+                        order_id="free_renew",
+                        payment_id="free_tier"
+                    )
+                    is_active = True
+                else:
+                    saved["status"] = "expired"
+                    is_active = False
+                    administrators_collection.update_one(
+                        {"_id": admin["_id"]},
+                        {"$set": {"subscription.status": "expired"}}
+                    )
+                    users_collection.update_one(
+                        {"_id": admin["_id"]},
+                        {"$set": {"subscription.status": "expired"}}
+                    )
 
-            inr_amount = float(current_plan.get("amount", PLAN["amount"]))
+            current_plan = get_user_plan(admin) or get_current_plan()
+            inr_amount = float(current_plan.get("amount", 0))
             conversion = convert_inr_to_country(inr_amount, "IN", "India")
+            all_plans = get_all_plans()
+            for p in all_plans:
+                p_amt = float(p.get("amount", 0))
+                p["conversion"] = convert_inr_to_country(p_amt, "IN", "India")
 
             return Response({
                 "status_code": 200,
                 "plan_active": is_active,
                 "plan": current_plan,
+                "plans": all_plans,
                 "conversion": conversion,
                 "subscription": saved,
             })
 
         if service == "create_subscription":
-            current_plan = get_current_plan()
+            plan_id = request.data.get("plan_id")
+            chosen_plan = get_plan_by_id(plan_id) if plan_id else get_current_plan()
             admin = admin_from_key(request.data.get("login_key"))
             if not admin:
                 return error_response("Sign in to your MirrorLink account before subscribing.", 401)
+            
             saved = admin.get("subscription", {})
             if saved.get("status") == "active" and (saved.get("current_end", 0) > int(time.time())):
+                if saved.get("plan_id") == chosen_plan.get("plan_id"):
+                    return Response({
+                        "status_text": f"Your {chosen_plan.get('name', 'subscription')} is already active.",
+                        "status_code": 200,
+                        "subscription_status": "active",
+                        "plan": chosen_plan,
+                    })
+
+            # Check if plan is FREE (amount == 0)
+            if float(chosen_plan.get("amount", 0)) == 0:
+                sub_data = activate_user_subscription(
+                    admin["_id"],
+                    plan=chosen_plan,
+                    order_id=f"free_{int(time.time())}",
+                    payment_id="free_tier"
+                )
                 return Response({
-                    "status_text": "Your MirrorLink subscription is already active.",
                     "status_code": 200,
-                    "subscription_status": "active"
+                    "status_text": "Free subscription plan activated successfully!",
+                    "subscription_status": "active",
+                    "subscription": sub_data,
+                    "plan": chosen_plan,
                 })
 
             session_url, _, web_url, source_app = get_bigburry_config()
@@ -408,15 +587,14 @@ class Billing(APIView):
             customer_email = admin.get("email_id") or admin.get("email") or ""
 
             # Check if user selected another country/currency or default INR
-            country_code = request.data.get("country_code")
-            inr_amount = float(current_plan.get("amount", PLAN["amount"]))
+            inr_amount = float(chosen_plan.get("amount", BUSINESS_PLAN["amount"]))
 
             # Always record the charge amount
             payload = {
                 "sourceApp": source_app,
                 "amount": inr_amount,
                 "currency": "INR",
-                "productName": current_plan.get("name", PLAN["name"]),
+                "productName": chosen_plan.get("name", BUSINESS_PLAN["name"]),
                 "customerName": customer_name,
                 "customerEmail": customer_email,
             }
@@ -434,7 +612,7 @@ class Billing(APIView):
                     "status_code": 200,
                     "session_id": session_id,
                     "checkout_url": checkout_url,
-                    "plan": current_plan,
+                    "plan": chosen_plan,
                 })
             except requests.RequestException as e:
                 return error_response(f"Could not reach BigBurry payment server: {str(e)}", 502)
@@ -447,6 +625,8 @@ class Billing(APIView):
             order_id = request.data.get("order_id") or request.data.get("orderId")
             payment_id = request.data.get("payment_id") or request.data.get("paymentId")
             signature = request.data.get("signature") or request.data.get("razorpay_signature")
+            plan_id = request.data.get("plan_id")
+            chosen_plan = get_plan_by_id(plan_id) or BUSINESS_PLAN
 
             if not order_id or not payment_id:
                 return error_response("order_id and payment_id are required for verification.", 400)
@@ -488,6 +668,7 @@ class Billing(APIView):
 
             sub_data = activate_user_subscription(
                 admin["_id"],
+                plan=chosen_plan,
                 order_id=order_id,
                 payment_id=payment_id,
                 metadata={"signature": signature}

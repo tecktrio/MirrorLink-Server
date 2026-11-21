@@ -24,7 +24,7 @@ from django.contrib.auth.hashers import make_password, check_password
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from .models import administrators_collection, users_collection, plans_collection, mirror_collection, sites_collection, content_collection, menu_templates_collection, menus_collection
-from .billing import PLAN, administrator_ids, count_administrator_mirrors, count_administrator_sites
+from .billing import PLAN, administrator_ids, count_administrator_mirrors, count_administrator_sites, get_user_plan_limits
 from s3_config import upload_file_to_s3, delete_file_from_s3
 
 MENU_ARTWORK_VERSION = 2
@@ -1042,6 +1042,16 @@ class Administrator(APIView):
                     except (ValueError, TypeError):
                         pass
 
+            # Check plan limits for content
+            limits = get_user_plan_limits(administrator)
+            if limits.get('total_contents') is not None:
+                total_contents_count = content_collection.count_documents({'administrator_id': {'$in': administrator_ids(administrator_id)}})
+                if total_contents_count >= limits['total_contents']:
+                    return Response({'status_code': 400, 'status_text': f"Your current plan allows up to {limits['total_contents']} content items in total. Please upgrade to Business for unlimited content."}, status=400)
+            if mirror and limits.get('contents_per_mirror') is not None:
+                if len(mirror.get('contents', [])) >= limits['contents_per_mirror']:
+                    return Response({'status_code': 400, 'status_text': f"Your current plan allows up to {limits['contents_per_mirror']} contents per mirror. Please upgrade to Business for unlimited content."}, status=400)
+
             new_content = {
                 "administrator_id": ObjectId(administrator_id),
                 "mirror_id": mirror['_id'] if mirror else (ObjectId(mirror_id) if mirror_id else None),
@@ -1173,8 +1183,9 @@ class Administrator(APIView):
                     **owned_query,
                     'site_id': {'$in': [site_object_id, str(site_object_id)]}
                 })
-                if assigned_count + len(target_mirrors) > PLAN['mirrors_per_site']:
-                    return Response({'status_text': 'This plan allows up to 50 mirrors per site.', 'status_code': 400}, status=400)
+                limits = get_user_plan_limits(administrator)
+                if assigned_count + len(target_mirrors) > limits['mirrors_per_site']:
+                    return Response({'status_text': f"This plan allows up to {limits['mirrors_per_site']} mirror{'s' if limits['mirrors_per_site'] > 1 else ''} per site.", 'status_code': 400}, status=400)
                 for mirror in target_mirrors:
                     mirror_collection.update_one({'_id': mirror['_id']}, {'$set': {'site_id': site_object_id}})
                 return Response({'status_text': 'Mirror added to site Successfully', 'status_code': 200})
@@ -1224,6 +1235,10 @@ class Administrator(APIView):
                             updated_contents.append(content_object_id)
                             existing_str_ids.add(str(cid))
                     
+                    limits = get_user_plan_limits(administrator)
+                    if limits.get('contents_per_mirror') is not None and len(updated_contents) > limits['contents_per_mirror']:
+                        return Response({'status_code': 400, 'status_text': f"Your plan allows up to {limits['contents_per_mirror']} contents per mirror. Upgrade to Business for unlimited content."}, status=400)
+
                     # Manage timeslots
                     timeslots = mirror.get('timeslots')
                     if not timeslots or not isinstance(timeslots, list):
@@ -1855,8 +1870,9 @@ class Administrator(APIView):
             administrator = get_administrator(login_key)
             if administrator:
                 administrator_id = administrator.get('_id')
-                if count_administrator_sites(administrator_id) >= PLAN['sites']:
-                    return Response({'status_code': 400, 'status_text': 'This plan allows up to 10 sites.'}, status=400)
+                limits = get_user_plan_limits(administrator)
+                if count_administrator_sites(administrator_id) >= limits['sites']:
+                    return Response({'status_code': 400, 'status_text': f"This plan allows up to {limits['sites']} site{'s' if limits['sites'] > 1 else ''}."}, status=400)
                 sites_collection.insert_one({
                     "site_name": site_name,
                     "site_description": site_description or '',
@@ -1906,8 +1922,9 @@ class Administrator(APIView):
                 return Response({'status_code': 401, 'status_text': 'invalid key'}, status=401)
             
             administrator_id = administrator.get('_id')
-            if count_administrator_mirrors(administrator_id) >= PLAN['sites'] * PLAN['mirrors_per_site']:
-                return Response({'status_code': 400, 'status_text': 'This plan allows up to 50 mirrors at each of 10 sites.'}, status=400)
+            limits = get_user_plan_limits(administrator)
+            if count_administrator_mirrors(administrator_id) >= limits['max_mirrors']:
+                return Response({'status_code': 400, 'status_text': f"This plan allows up to {limits['max_mirrors']} mirror{'s' if limits['max_mirrors'] > 1 else ''}."}, status=400)
             mirror_name = request.data.get('mirror_name', '').strip()
             if not mirror_name:
                 return Response({'status_code': 400, 'status_text': 'Mirror Name is required.'}, status=400)
@@ -1943,8 +1960,8 @@ class Administrator(APIView):
                 if mirror_collection.count_documents({
                     'administrator_id': {'$in': administrator_ids(administrator_id)},
                     'site_id': {'$in': [site_obj_id, str(site_obj_id)]}
-                }) >= PLAN['mirrors_per_site']:
-                    return Response({'status_code': 400, 'status_text': 'This plan allows up to 50 mirrors per site.'}, status=400)
+                }) >= limits['mirrors_per_site']:
+                    return Response({'status_code': 400, 'status_text': f"This plan allows up to {limits['mirrors_per_site']} mirror{'s' if limits['mirrors_per_site'] > 1 else ''} per site."}, status=400)
 
             current_time = time.time()
             res = mirror_collection.insert_one({
@@ -2070,8 +2087,9 @@ class Administrator(APIView):
             
             administrator = administrators_collection.find_one({"username": administrator_username})
             if administrator is not None:
-                if count_administrator_sites(administrator.get('_id')) >= PLAN['sites']:
-                    return Response({'status_code': 400, 'status_text': 'This plan allows up to 10 sites.'}, status=400)
+                limits = get_user_plan_limits(administrator)
+                if count_administrator_sites(administrator.get('_id')) >= limits['sites']:
+                    return Response({'status_code': 400, 'status_text': f"This plan allows up to {limits['sites']} site{'s' if limits['sites'] > 1 else ''}."}, status=400)
                 site_data = {
                     "site_name": site_name,
                     "administrator_id": administrator.get('_id'),
@@ -2390,6 +2408,61 @@ class Mirror(APIView):
                 if not mirror:
                     mirror = mirror_collection.find_one({'username': clean_u})
 
+            # Built-in public demo mirror for test displays (no sign-in required)
+            is_demo_request = bool(
+                (mirror_name and str(mirror_name).strip().lower() in ('demo', 'demoscreen', 'demo-mirror', 'demo_mirror')) or
+                (username and str(username).strip().lower() in ('demo', 'demoscreen', 'demo-mirror', 'demo_mirror'))
+            )
+            if not mirror and is_demo_request:
+                return Response({
+                    'status_text': 'ok',
+                    'status_code': 200,
+                    'mirror_id': 'demo_screen_mock_id',
+                    'mirror_name': 'demo',
+                    'photo_duration': 3,
+                    'active_content_index': 0,
+                    'sync_timestamp': 0,
+                    'playback_state': 'playing',
+                    'data': [
+                        {
+                            '_id': 'demo_content_vid_1',
+                            'administrator_id': 'demo_admin',
+                            'mirror_id': 'demo_screen_mock_id',
+                            'content_title': 'Content 1',
+                            'content_description': 'Demo Video 1',
+                            'content_url': 'https://screenpilot.bigburry.com/testvid1.mp4',
+                            'content_format': 'mp4',
+                            'is_active': True,
+                            'order': 1,
+                            'duration': 3
+                        },
+                        {
+                            '_id': 'demo_content_vid_2',
+                            'administrator_id': 'demo_admin',
+                            'mirror_id': 'demo_screen_mock_id',
+                            'content_title': 'Content 2',
+                            'content_description': 'Demo Video 2',
+                            'content_url': 'https://screenpilot.bigburry.com/testvid2.mp4',
+                            'content_format': 'mp4',
+                            'is_active': True,
+                            'order': 2,
+                            'duration': 3
+                        },
+                        {
+                            '_id': 'demo_content_vid_3',
+                            'administrator_id': 'demo_admin',
+                            'mirror_id': 'demo_screen_mock_id',
+                            'content_title': 'Content 3',
+                            'content_description': 'Demo Video 3',
+                            'content_url': 'https://screenpilot.bigburry.com/testvid3.mp4',
+                            'content_format': 'mp4',
+                            'is_active': True,
+                            'order': 3,
+                            'duration': 3
+                        }
+                    ]
+                })
+
             if mirror:
                 mirror_status = str(mirror.get('status', '')).strip().lower()
                 if mirror.get('is_active') is False or mirror_status in ('inactive', 'disabled'):
@@ -2466,13 +2539,14 @@ class Mirror(APIView):
             if administrator:
                 site = sites_collection.find_one({'site_name': site_name, 'administrator_id': {'$in': [administrator.get("_id"), str(administrator.get("_id"))]}})
                 administrator_id = administrator.get('_id')
-                if count_administrator_mirrors(administrator_id) >= PLAN['sites'] * PLAN['mirrors_per_site']:
-                    return Response({'status_code': 400, 'status_text': 'This plan allows up to 50 mirrors at each of 10 sites.'}, status=400)
+                limits = get_user_plan_limits(administrator)
+                if count_administrator_mirrors(administrator_id) >= limits['max_mirrors']:
+                    return Response({'status_code': 400, 'status_text': f"This plan allows up to {limits['max_mirrors']} mirror{'s' if limits['max_mirrors'] > 1 else ''}."}, status=400)
                 if site and mirror_collection.count_documents({
                     'administrator_id': {'$in': administrator_ids(administrator_id)},
                     'site_id': {'$in': [site.get('_id'), str(site.get('_id'))]}
-                }) >= PLAN['mirrors_per_site']:
-                    return Response({'status_code': 400, 'status_text': 'This plan allows up to 50 mirrors per site.'}, status=400)
+                }) >= limits['mirrors_per_site']:
+                    return Response({'status_code': 400, 'status_text': f"This plan allows up to {limits['mirrors_per_site']} mirror{'s' if limits['mirrors_per_site'] > 1 else ''} per site."}, status=400)
                 mirror_data = {
                     "username": username,
                     "password": password,
@@ -2726,6 +2800,44 @@ class MirrorStreamView(View):
             mirror = mirror_collection.find_one({'mirror_name': clean_u})
             if not mirror:
                 mirror = mirror_collection.find_one({'username': clean_u})
+
+        is_demo_request = bool(
+            (mirror_name and str(mirror_name).strip().lower() in ('demo', 'demoscreen', 'demo-mirror', 'demo_mirror')) or
+            (username and str(username).strip().lower() in ('demo', 'demoscreen', 'demo-mirror', 'demo_mirror'))
+        )
+        if not mirror and is_demo_request:
+            async def demo_event_stream():
+                demo_slides = [
+                    {'index': 0, 'content_url': 'https://screenpilot.bigburry.com/testvid1.mp4', 'content_title': 'Content 1', 'duration': 3, 'format': 'mp4'},
+                    {'index': 1, 'content_url': 'https://screenpilot.bigburry.com/testvid2.mp4', 'content_title': 'Content 2', 'duration': 3, 'format': 'mp4'},
+                    {'index': 2, 'content_url': 'https://screenpilot.bigburry.com/testvid3.mp4', 'content_title': 'Content 3', 'duration': 3, 'format': 'mp4'},
+                ]
+                initial_state = {
+                    'mirror_id': 'demo_screen_mock_id',
+                    'mirror_name': 'demo',
+                    'active_content_index': 0,
+                    'playback_state': 'playing',
+                    'photo_duration': 3,
+                    'content': demo_slides[0]
+                }
+                yield f"event: init\ndata: {json.dumps(initial_state)}\n\n"
+                cur_idx = 0
+                while True:
+                    await asyncio.sleep(3)
+                    cur_idx = (cur_idx + 1) % len(demo_slides)
+                    slide_event = {
+                        'index': cur_idx,
+                        'content': demo_slides[cur_idx],
+                        'content_id': f'demo_content_vid_{cur_idx + 1}',
+                        'timestamp': time.time()
+                    }
+                    yield f"event: slide_change\ndata: {json.dumps(slide_event)}\n\n"
+
+            stream_response = StreamingHttpResponse(demo_event_stream(), content_type="text/event-stream")
+            stream_response['Cache-Control'] = 'no-cache'
+            stream_response['X-Accel-Buffering'] = 'no'
+            stream_response['Access-Control-Allow-Origin'] = '*'
+            return stream_response
 
         if not mirror:
             resp = HttpResponse(
